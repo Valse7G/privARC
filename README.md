@@ -1,10 +1,12 @@
-# PrivARC v4 — PrivARC Cyberpunk OS Auth
-Run: `npm install && npm run dev`
-Deploy: Push to GitHub → vercel.com → Vite
+# PrivARC v5
 
-## Features v4
-- Viem/Wagmi on-chain integration layer
-- ARC Network auto-switch (chainId 7070)
-- Shield, Private Swap, Private Send, Withdraw, Bridge panels
-- ZK proof simulation
-- AI agent log
+Run: `npm install && npm run dev`
+Deploy: GitHub → vercel.com → Vite
+
+## Features v5
+- Full OS sidebar (14 panels)
+- Overview, Shield, Swap, Send, Withdraw, Bridge
+- Portfolio (donut chart), AI Agents, History, Settings
+- Staking panel with lock multipliers
+- On-chain governance voting (PIP proposals)
+- Block counter, agent live log
