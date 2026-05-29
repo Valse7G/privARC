@@ -1,158 +1,91 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
-// ── Simulated crypto wallet generation ──────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════════
+   UTILS
+═══════════════════════════════════════════════════════════════ */
+const rand = (min, max) => Math.random() * (max - min) + min;
+const hex = (len) => Array.from({ length: len }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
+
 function generateWallet() {
-  const chars = "0123456789abcdef";
-  const hex = (len) => Array.from({ length: len }, () => chars[Math.floor(Math.random() * 16)]).join("");
   const privateKey = "0x" + hex(64);
   const address = "0x" + hex(40);
-  const mnemonic = [
+  const WORDLIST = [
     "abandon","ability","able","about","above","absent","absorb","abstract",
     "absurd","abuse","access","accident","account","accuse","achieve","acid",
-    "acoustic","acquire","across","act","action","actor","actress","actual"
+    "acoustic","acquire","across","act","action","actor","actress","actual",
+    "adapt","add","addict","address","adjust","admit","adult","advance",
+    "advice","aerobic","afford","afraid","again","agent","agree","ahead",
+    "aim","air","airport","aisle","alarm","album","alcohol","alert"
   ];
-  const words = Array.from({ length: 12 }, () => mnemonic[Math.floor(Math.random() * mnemonic.length)]);
-  return { privateKey, address, mnemonic: words.join(" ") };
+  const mnemonic = Array.from({ length: 12 }, () => WORDLIST[Math.floor(Math.random() * WORDLIST.length)]).join(" ");
+  return { privateKey, address, mnemonic, network: "ARC Network", created: new Date().toISOString() };
 }
 
-function shortAddr(addr) {
-  return addr.slice(0, 6) + "…" + addr.slice(-4);
-}
+function shortAddr(a) { return a.slice(0, 8) + "···" + a.slice(-6); }
 
-// ── Icon components ──────────────────────────────────────────────────────────
-const EyeIcon = ({ open }) => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    {open ? (
-      <>
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-        <circle cx="12" cy="12" r="3"/>
-      </>
-    ) : (
-      <>
-        <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/>
-        <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/>
-        <line x1="1" y1="1" x2="23" y2="23"/>
-      </>
-    )}
-  </svg>
-);
-
-const CopyIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <rect x="9" y="9" width="13" height="13" rx="2"/>
-    <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-  </svg>
-);
-
-const CheckIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-    <polyline points="20 6 9 17 4 12"/>
-  </svg>
-);
-
-const ShieldIcon = () => (
-  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-  </svg>
-);
-
-const WalletIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-    <rect x="2" y="5" width="20" height="14" rx="2"/>
-    <path d="M16 13a1 1 0 100-2 1 1 0 000 2z" fill="currentColor"/>
-    <path d="M2 10h20"/>
-  </svg>
-);
-
-const LockIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <rect x="3" y="11" width="18" height="11" rx="2"/>
-    <path d="M7 11V7a5 5 0 0110 0v4"/>
-  </svg>
-);
-
-const MailIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <rect x="2" y="4" width="20" height="16" rx="2"/>
-    <path d="M22 7l-10 7L2 7"/>
-  </svg>
-);
-
-const UserIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
-    <circle cx="12" cy="7" r="4"/>
-  </svg>
-);
-
-const ArcIcon = () => (
-  <svg width="32" height="32" viewBox="0 0 64 64" fill="none">
-    <defs>
-      <linearGradient id="arcG" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stopColor="#00B4D8"/>
-        <stop offset="100%" stopColor="#0077B6"/>
-      </linearGradient>
-    </defs>
-    <circle cx="32" cy="32" r="30" fill="url(#arcG)" opacity="0.15"/>
-    <circle cx="32" cy="32" r="30" stroke="url(#arcG)" strokeWidth="2"/>
-    <path d="M20 44 L32 20 L44 44" stroke="url(#arcG)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-    <path d="M24 36 H40" stroke="url(#arcG)" strokeWidth="2.5" strokeLinecap="round"/>
-  </svg>
-);
-
-// ── Particle background ───────────────────────────────────────────────────────
-function Particles() {
+/* ═══════════════════════════════════════════════════════════════
+   ANIMATED HEX GRID BACKGROUND
+═══════════════════════════════════════════════════════════════ */
+function HexGrid() {
   const canvasRef = useRef(null);
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    let raf;
-    let particles = [];
-    const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
+    let raf, t = 0;
+    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
     resize();
     window.addEventListener("resize", resize);
-    for (let i = 0; i < 55; i++) {
-      particles.push({
-        x: Math.random() * canvas.width,
-        y: Math.random() * canvas.height,
-        r: Math.random() * 1.5 + 0.3,
-        vx: (Math.random() - 0.5) * 0.25,
-        vy: (Math.random() - 0.5) * 0.25,
-        o: Math.random() * 0.5 + 0.15,
-      });
-    }
+
+    const drawHex = (x, y, r, alpha, fill) => {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 3) * i - Math.PI / 6;
+        i === 0 ? ctx.moveTo(x + r * Math.cos(a), y + r * Math.sin(a))
+                : ctx.lineTo(x + r * Math.cos(a), y + r * Math.sin(a));
+      }
+      ctx.closePath();
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      ctx.strokeStyle = `rgba(0,255,180,${alpha})`;
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    };
+
     const draw = () => {
+      t += 0.008;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      particles.forEach((p) => {
-        p.x += p.vx; p.y += p.vy;
-        if (p.x < 0) p.x = canvas.width;
-        if (p.x > canvas.width) p.x = 0;
-        if (p.y < 0) p.y = canvas.height;
-        if (p.y > canvas.height) p.y = 0;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(0,180,216,${p.o})`;
-        ctx.fill();
-      });
-      // connections
-      for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const dx = particles[i].x - particles[j].x;
-          const dy = particles[i].y - particles[j].y;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < 120) {
-            ctx.beginPath();
-            ctx.moveTo(particles[i].x, particles[i].y);
-            ctx.lineTo(particles[j].x, particles[j].y);
-            ctx.strokeStyle = `rgba(0,180,216,${0.08 * (1 - d / 120)})`;
-            ctx.lineWidth = 0.5;
-            ctx.stroke();
-          }
+
+      // Radial gradient bg
+      const grd = ctx.createRadialGradient(
+        canvas.width * 0.5, canvas.height * 0.4, 0,
+        canvas.width * 0.5, canvas.height * 0.4, canvas.width * 0.7
+      );
+      grd.addColorStop(0, "rgba(0,20,12,1)");
+      grd.addColorStop(1, "rgba(0,8,5,1)");
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const R = 38, cols = Math.ceil(canvas.width / (R * 1.73)) + 2;
+      const rows = Math.ceil(canvas.height / (R * 1.5)) + 2;
+
+      for (let row = -1; row < rows; row++) {
+        for (let col = -1; col < cols; col++) {
+          const x = col * R * 1.73 + (row % 2 === 0 ? 0 : R * 0.865);
+          const y = row * R * 1.5;
+          const d = Math.sqrt((x - canvas.width * 0.5) ** 2 + (y - canvas.height * 0.4) ** 2);
+          const wave = Math.sin(d * 0.012 - t * 1.8) * 0.5 + 0.5;
+          const pulse = Math.sin(t * 0.7 + col * 0.3 + row * 0.5) * 0.3 + 0.3;
+          const alpha = wave * pulse * 0.4;
+          const fill = alpha > 0.18 ? `rgba(0,255,160,${alpha * 0.06})` : null;
+          drawHex(x, y, R - 2, alpha, fill);
         }
       }
+
+      // Scanlines
+      for (let y = 0; y < canvas.height; y += 3) {
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(0, y, canvas.width, 1);
+      }
+
       raf = requestAnimationFrame(draw);
     };
     draw();
@@ -161,617 +94,940 @@ function Particles() {
   return <canvas ref={canvasRef} style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none" }} />;
 }
 
-// ── Input field ──────────────────────────────────────────────────────────────
-function Field({ label, type, value, onChange, placeholder, icon, hint, error }) {
-  const [show, setShow] = useState(false);
-  const isPass = type === "password";
+/* ═══════════════════════════════════════════════════════════════
+   TYPEWRITER
+═══════════════════════════════════════════════════════════════ */
+function Typewriter({ text, speed = 38, onDone, style }) {
+  const [displayed, setDisplayed] = useState("");
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    setDisplayed(""); setDone(false);
+    let i = 0;
+    const id = setInterval(() => {
+      i++;
+      setDisplayed(text.slice(0, i));
+      if (i >= text.length) { clearInterval(id); setDone(true); onDone?.(); }
+    }, speed);
+    return () => clearInterval(id);
+  }, [text]);
   return (
-    <div style={{ marginBottom: 18 }}>
-      <label style={{ display: "block", fontSize: 12, fontWeight: 600,
-        color: "#94A3B8", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
-        {label}
-      </label>
-      <div style={{ position: "relative" }}>
-        <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)",
-          color: error ? "#F87171" : "#00B4D8", display: "flex", alignItems: "center" }}>
-          {icon}
-        </span>
-        <input
-          type={isPass && show ? "text" : type}
-          value={value}
-          onChange={onChange}
-          placeholder={placeholder}
-          style={{
-            width: "100%", boxSizing: "border-box",
-            padding: "13px 44px 13px 42px",
-            background: "rgba(255,255,255,0.04)",
-            border: `1.5px solid ${error ? "rgba(248,113,113,0.6)" : "rgba(0,180,216,0.2)"}`,
-            borderRadius: 10, color: "#F1F5F9", fontSize: 14,
-            outline: "none", fontFamily: "'DM Mono', monospace",
-            transition: "border-color 0.2s, box-shadow 0.2s",
-          }}
-          onFocus={e => {
-            e.target.style.borderColor = error ? "rgba(248,113,113,0.8)" : "rgba(0,180,216,0.7)";
-            e.target.style.boxShadow = error
-              ? "0 0 0 3px rgba(248,113,113,0.12)"
-              : "0 0 0 3px rgba(0,180,216,0.12)";
-          }}
-          onBlur={e => {
-            e.target.style.borderColor = error ? "rgba(248,113,113,0.6)" : "rgba(0,180,216,0.2)";
-            e.target.style.boxShadow = "none";
-          }}
-        />
-        {isPass && (
-          <button onClick={() => setShow(!show)} style={{
-            position: "absolute", right: 13, top: "50%", transform: "translateY(-50%)",
-            background: "none", border: "none", cursor: "pointer",
-            color: "#64748B", padding: 0, display: "flex"
-          }}>
-            <EyeIcon open={show} />
-          </button>
-        )}
+    <span style={style}>
+      {displayed}
+      {!done && <span style={{ animation: "blink 1s step-end infinite", color: "#00FFB0" }}>█</span>}
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BOOT SEQUENCE
+═══════════════════════════════════════════════════════════════ */
+function BootSequence({ onComplete }) {
+  const [lines, setLines] = useState([]);
+  const [done, setDone] = useState(false);
+
+  const BOOT_LINES = [
+    { t: 0,    text: "PRIVARC OS v2.4.1 — ARC Network", color: "#00FFB0" },
+    { t: 300,  text: "Initializing cryptographic subsystems...", color: "#4ADE80" },
+    { t: 700,  text: "Loading ZK-proof engine [Groth16] ✓", color: "#4ADE80" },
+    { t: 1100, text: "Connecting to ARC Network RPC... [OK]", color: "#4ADE80" },
+    { t: 1400, text: "ShieldVault contract: 0x7f3a...d9e2 ✓", color: "#4ADE80" },
+    { t: 1700, text: "AI Agent cluster: ONLINE (8 agents)", color: "#00FFB0" },
+    { t: 2000, text: "USDC fee module: active", color: "#4ADE80" },
+    { t: 2300, text: "Privacy layer: ARMED", color: "#F59E0B" },
+    { t: 2700, text: "━━━ SYSTEM READY — AUTHENTICATE TO PROCEED ━━━", color: "#00FFB0" },
+  ];
+
+  useEffect(() => {
+    BOOT_LINES.forEach(({ t, text, color }) => {
+      setTimeout(() => setLines(p => [...p, { text, color }]), t);
+    });
+    setTimeout(() => { setDone(true); setTimeout(onComplete, 500); }, 3400);
+  }, []);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 100,
+      background: "#000A06",
+      display: "flex", flexDirection: "column", justifyContent: "center",
+      padding: "0 10vw",
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      opacity: done ? 0 : 1,
+      transition: "opacity 0.5s ease",
+      pointerEvents: done ? "none" : "all"
+    }}>
+      <div style={{ marginBottom: 32 }}>
+        <div style={{
+          fontSize: 11, color: "#1A4A30", letterSpacing: "0.3em",
+          marginBottom: 8
+        }}>PRIVARC AUTONOMOUS CRYPTO OS</div>
+        <div style={{ width: 60, height: 2, background: "#00FFB0", marginBottom: 24 }} />
       </div>
-      {error && <p style={{ margin: "5px 0 0", fontSize: 11.5, color: "#F87171" }}>{error}</p>}
-      {hint && !error && <p style={{ margin: "5px 0 0", fontSize: 11.5, color: "#64748B" }}>{hint}</p>}
+      {lines.map((l, i) => (
+        <div key={i} style={{
+          fontSize: 13, color: l.color, marginBottom: 6,
+          letterSpacing: "0.05em", lineHeight: 1.6,
+          animation: "fadeIn 0.3s ease forwards"
+        }}>
+          <span style={{ color: "#1A4A30", marginRight: 12 }}>[{String(i).padStart(2, "0")}]</span>
+          {l.text}
+        </div>
+      ))}
+      {lines.length > 0 && (
+        <div style={{ marginTop: 24, height: 2, background: "#0A2018",
+          position: "relative", overflow: "hidden", width: "100%" }}>
+          <div style={{
+            position: "absolute", top: 0, left: 0, height: "100%",
+            background: "#00FFB0",
+            width: `${Math.min(100, (lines.length / BOOT_LINES.length) * 100)}%`,
+            transition: "width 0.3s ease",
+            boxShadow: "0 0 10px #00FFB0"
+          }} />
+        </div>
+      )}
     </div>
   );
 }
 
-// ── Password strength ─────────────────────────────────────────────────────────
-function PasswordStrength({ password }) {
-  const checks = [
-    password.length >= 8,
-    /[A-Z]/.test(password),
-    /[0-9]/.test(password),
-    /[^A-Za-z0-9]/.test(password),
-  ];
-  const score = checks.filter(Boolean).length;
-  const labels = ["", "Faible", "Moyen", "Bon", "Fort"];
-  const colors = ["", "#EF4444", "#F59E0B", "#3B82F6", "#10B981"];
-  if (!password) return null;
+/* ═══════════════════════════════════════════════════════════════
+   GLITCH TEXT
+═══════════════════════════════════════════════════════════════ */
+function GlitchText({ text, style }) {
+  return (
+    <span style={{ position: "relative", display: "inline-block", ...style }}>
+      <span style={{ position: "relative", zIndex: 1 }}>{text}</span>
+      <span style={{
+        position: "absolute", top: 0, left: 0,
+        color: "#00FFB0", opacity: 0,
+        animation: "glitch1 4s infinite",
+        clipPath: "polygon(0 30%, 100% 30%, 100% 50%, 0 50%)",
+        transform: "translateX(-2px)"
+      }}>{text}</span>
+      <span style={{
+        position: "absolute", top: 0, left: 0,
+        color: "#0EA5E9", opacity: 0,
+        animation: "glitch2 4s infinite",
+        clipPath: "polygon(0 60%, 100% 60%, 100% 80%, 0 80%)",
+        transform: "translateX(2px)"
+      }}>{text}</span>
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INPUT FIELD — OS TERMINAL STYLE
+═══════════════════════════════════════════════════════════════ */
+function OsField({ label, type, value, onChange, placeholder, icon, error, hint }) {
+  const [focused, setFocused] = useState(false);
+  const [showPass, setShowPass] = useState(false);
+  const isPass = type === "password";
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between",
+        alignItems: "center", marginBottom: 6
+      }}>
+        <label style={{
+          fontSize: 10, fontWeight: 700, letterSpacing: "0.15em",
+          textTransform: "uppercase", color: focused ? "#00FFB0" : "#1E5C3A",
+          fontFamily: "'JetBrains Mono', monospace", transition: "color 0.2s"
+        }}>
+          {icon} {label}
+        </label>
+        {error && <span style={{ fontSize: 10, color: "#EF4444", letterSpacing: "0.05em" }}>
+          ⚠ {error}
+        </span>}
+      </div>
+      <div style={{ position: "relative" }}>
+        {/* Corner brackets */}
+        {["tl","tr","bl","br"].map(pos => (
+          <span key={pos} style={{
+            position: "absolute", zIndex: 2,
+            width: 8, height: 8,
+            borderColor: focused ? "#00FFB0" : (error ? "#EF4444" : "#1A4A30"),
+            borderStyle: "solid", borderWidth: 0,
+            ...(pos === "tl" ? { top: -1, left: -1, borderTopWidth: 2, borderLeftWidth: 2 } : {}),
+            ...(pos === "tr" ? { top: -1, right: -1, borderTopWidth: 2, borderRightWidth: 2 } : {}),
+            ...(pos === "bl" ? { bottom: -1, left: -1, borderBottomWidth: 2, borderLeftWidth: 2 } : {}),
+            ...(pos === "br" ? { bottom: -1, right: -1, borderBottomWidth: 2, borderRightWidth: 2 } : {}),
+            transition: "border-color 0.2s"
+          }} />
+        ))}
+        <input
+          type={isPass && !showPass ? "password" : "text"}
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={{
+            width: "100%", boxSizing: "border-box",
+            padding: "12px 40px 12px 14px",
+            background: focused ? "rgba(0,255,176,0.03)" : "rgba(0,0,0,0.4)",
+            border: `1px solid ${error ? "#EF4444" : focused ? "rgba(0,255,176,0.4)" : "rgba(0,255,176,0.1)"}`,
+            borderRadius: 3,
+            color: "#A7F3D0",
+            fontSize: 13,
+            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+            outline: "none",
+            letterSpacing: "0.05em",
+            boxShadow: focused ? "0 0 20px rgba(0,255,176,0.06), inset 0 0 20px rgba(0,255,176,0.02)" : "none",
+            transition: "all 0.2s",
+          }}
+        />
+        {isPass && (
+          <button onClick={() => setShowPass(!showPass)} style={{
+            position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+            background: "none", border: "none", cursor: "pointer",
+            color: showPass ? "#00FFB0" : "#1E5C3A", fontSize: 14, padding: 0,
+            fontFamily: "monospace", transition: "color 0.2s"
+          }}>
+            {showPass ? "◉" : "◎"}
+          </button>
+        )}
+      </div>
+      {hint && !error && (
+        <div style={{ marginTop: 4, fontSize: 10, color: "#0F3A22", letterSpacing: "0.06em" }}>{hint}</div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PASSWORD STRENGTH
+═══════════════════════════════════════════════════════════════ */
+function PassStrength({ pw }) {
+  if (!pw) return null;
+  const score = [pw.length >= 8, /[A-Z]/.test(pw), /[0-9]/.test(pw), /[^A-Za-z0-9]/.test(pw)].filter(Boolean).length;
+  const labels = ["", "WEAK", "FAIR", "GOOD", "STRONG"];
+  const cols = ["", "#EF4444", "#F59E0B", "#3B82F6", "#00FFB0"];
   return (
     <div style={{ marginTop: -10, marginBottom: 16 }}>
-      <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+      <div style={{ display: "flex", gap: 3 }}>
         {[1,2,3,4].map(i => (
           <div key={i} style={{
-            flex: 1, height: 3, borderRadius: 2,
-            background: i <= score ? colors[score] : "rgba(255,255,255,0.1)",
+            flex: 1, height: 2,
+            background: i <= score ? cols[score] : "#0A1F14",
+            boxShadow: i <= score && score === 4 ? `0 0 6px ${cols[score]}` : "none",
             transition: "background 0.3s"
           }} />
         ))}
       </div>
-      <span style={{ fontSize: 11, color: colors[score] }}>{labels[score]}</span>
+      <div style={{ marginTop: 4, fontSize: 9, color: cols[score], letterSpacing: "0.12em" }}>
+        ENTROPY: {labels[score]}
+      </div>
     </div>
   );
 }
 
-// ── Wallet reveal card ────────────────────────────────────────────────────────
-function WalletCard({ wallet, onContinue }) {
+/* ═══════════════════════════════════════════════════════════════
+   WALLET REVEAL
+═══════════════════════════════════════════════════════════════ */
+function WalletReveal({ wallet, onContinue }) {
+  const [phase, setPhase] = useState(0); // 0=generating, 1=reveal
   const [copied, setCopied] = useState({});
-  const [revealed, setRevealed] = useState(false);
+  const [showMnem, setShowMnem] = useState(false);
+  const [showPk, setShowPk] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    const steps = [0, 15, 35, 55, 72, 88, 100];
+    let i = 0;
+    const id = setInterval(() => {
+      i++;
+      setProgress(steps[i] || 100);
+      if (i >= steps.length - 1) { clearInterval(id); setTimeout(() => setPhase(1), 400); }
+    }, 280);
+    return () => clearInterval(id);
+  }, []);
 
   const copy = (key, text) => {
     navigator.clipboard.writeText(text).catch(() => {});
     setCopied(p => ({ ...p, [key]: true }));
-    setTimeout(() => setCopied(p => ({ ...p, [key]: false })), 1800);
+    setTimeout(() => setCopied(p => ({ ...p, [key]: false })), 2000);
   };
 
-  return (
-    <div style={{ animation: "fadeUp 0.5s ease forwards" }}>
-      {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: 28 }}>
+  const GEN_STEPS = [
+    "Generating entropy from /dev/urandom...",
+    "Deriving secp256k1 keypair...",
+    "Computing ARC Network address...",
+    "Encoding BIP-39 mnemonic...",
+    "Registering stealth keys...",
+    "Linking to PrivARC account...",
+    "WALLET READY",
+  ];
+
+  if (phase === 0) return (
+    <div style={{ padding: "8px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
         <div style={{
-          width: 64, height: 64, borderRadius: "50%",
-          background: "linear-gradient(135deg, rgba(0,180,216,0.2), rgba(0,119,182,0.3))",
-          border: "2px solid rgba(0,180,216,0.4)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          margin: "0 auto 16px", fontSize: 28
-        }}>✅</div>
-        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#F1F5F9",
-          fontFamily: "'Syne', sans-serif" }}>Wallet créé avec succès</h2>
-        <p style={{ margin: "6px 0 0", fontSize: 13, color: "#64748B" }}>
-          Sauvegardez ces informations en lieu sûr
+          width: 10, height: 10, borderRadius: "50%",
+          background: "#00FFB0",
+          boxShadow: "0 0 12px #00FFB0",
+          animation: "pulse 1s ease infinite"
+        }} />
+        <span style={{ fontSize: 11, color: "#00FFB0", letterSpacing: "0.15em", fontFamily: "monospace" }}>
+          GENERATING WALLET
+        </span>
+      </div>
+
+      {GEN_STEPS.slice(0, Math.ceil((progress / 100) * GEN_STEPS.length)).map((s, i) => (
+        <div key={i} style={{
+          fontSize: 12, color: i === Math.ceil((progress / 100) * GEN_STEPS.length) - 1 ? "#A7F3D0" : "#1E5C3A",
+          marginBottom: 6, fontFamily: "monospace", letterSpacing: "0.04em",
+          animation: "fadeIn 0.3s ease"
+        }}>
+          <span style={{ color: "#0F3A22", marginRight: 10 }}>›</span>{s}
+        </div>
+      ))}
+
+      <div style={{ marginTop: 20, background: "#0A1F14", borderRadius: 2, overflow: "hidden", height: 3 }}>
+        <div style={{
+          height: "100%", background: "linear-gradient(90deg, #00FFB0, #0EA5E9)",
+          width: `${progress}%`, transition: "width 0.28s ease",
+          boxShadow: "0 0 8px #00FFB0"
+        }} />
+      </div>
+      <div style={{ marginTop: 6, fontSize: 10, color: "#0F3A22", textAlign: "right", fontFamily: "monospace" }}>
+        {progress}%
+      </div>
+    </div>
+  );
+
+  // Data row helper
+  const DataRow = ({ label, value, copyKey, blurred, onReveal, revealed }) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{
+        fontSize: 9, color: "#0F3A22", letterSpacing: "0.15em",
+        fontFamily: "monospace", marginBottom: 5, textTransform: "uppercase"
+      }}>{label}</div>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        background: "rgba(0,255,176,0.03)",
+        border: "1px solid rgba(0,255,176,0.1)",
+        borderRadius: 3, padding: "9px 12px"
+      }}>
+        <span style={{
+          flex: 1, fontSize: 11, fontFamily: "monospace",
+          color: "#A7F3D0", wordBreak: "break-all", lineHeight: 1.5,
+          filter: blurred && !revealed ? "blur(5px)" : "none",
+          transition: "filter 0.3s", userSelect: blurred && !revealed ? "none" : "text"
+        }}>{value}</span>
+        {blurred && (
+          <button onClick={onReveal} style={{
+            background: "none", border: "1px solid rgba(0,255,176,0.2)",
+            borderRadius: 2, color: "#00FFB0", fontSize: 9, padding: "3px 7px",
+            cursor: "pointer", fontFamily: "monospace", letterSpacing: "0.1em",
+            flexShrink: 0
+          }}>{revealed ? "HIDE" : "SHOW"}</button>
+        )}
+        <button onClick={() => copy(copyKey, value)} style={{
+          background: "none", border: "1px solid rgba(0,255,176,0.15)",
+          borderRadius: 2, color: copied[copyKey] ? "#00FFB0" : "#1E5C3A",
+          fontSize: 9, padding: "3px 7px", cursor: "pointer",
+          fontFamily: "monospace", letterSpacing: "0.1em", flexShrink: 0,
+          transition: "color 0.2s"
+        }}>
+          {copied[copyKey] ? "✓ OK" : "COPY"}
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ animation: "fadeIn 0.4s ease" }}>
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+          <div style={{ width: 8, height: 8, background: "#00FFB0", borderRadius: "50%",
+            boxShadow: "0 0 8px #00FFB0" }} />
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#00FFB0", letterSpacing: "0.1em",
+            fontFamily: "monospace" }}>WALLET INITIALIZED</span>
+        </div>
+        <p style={{ margin: 0, fontSize: 11, color: "#1E5C3A", fontFamily: "monospace" }}>
+          ARC Network · Stealth address enabled · ZK-ready
         </p>
       </div>
 
       {/* Warning */}
       <div style={{
-        background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)",
-        borderRadius: 10, padding: "12px 16px", marginBottom: 20,
-        display: "flex", gap: 10, alignItems: "flex-start"
+        border: "1px solid rgba(245,158,11,0.3)", borderRadius: 3,
+        background: "rgba(245,158,11,0.05)", padding: "10px 14px", marginBottom: 18,
+        display: "flex", gap: 10
       }}>
-        <span style={{ fontSize: 16 }}>⚠️</span>
-        <p style={{ margin: 0, fontSize: 12, color: "#FCD34D", lineHeight: 1.5 }}>
-          <strong>Ne partagez jamais</strong> votre clé privée ni votre phrase mnémonique.
-          PrivARC ne vous les demandera jamais.
+        <span style={{ color: "#F59E0B", fontSize: 13 }}>⚠</span>
+        <p style={{ margin: 0, fontSize: 11, color: "#92400E", lineHeight: 1.5, fontFamily: "monospace" }}>
+          CRITICAL: Store your recovery phrase offline. PrivARC cannot recover lost keys.
         </p>
       </div>
 
-      {/* Address */}
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: "#64748B",
-          letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>
-          Adresse du Wallet
-        </label>
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10,
-          background: "rgba(0,180,216,0.06)", border: "1px solid rgba(0,180,216,0.2)",
-          borderRadius: 10, padding: "10px 14px"
-        }}>
-          <span style={{ fontSize: 13, color: "#00B4D8", fontFamily: "'DM Mono', monospace",
-            flex: 1, wordBreak: "break-all" }}>{wallet.address}</span>
-          <button onClick={() => copy("addr", wallet.address)} style={{
-            background: "none", border: "none", cursor: "pointer",
-            color: copied.addr ? "#10B981" : "#64748B", flexShrink: 0
-          }}>
-            {copied.addr ? <CheckIcon /> : <CopyIcon />}
-          </button>
-        </div>
-      </div>
-
-      {/* Mnemonic */}
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-          <label style={{ fontSize: 11, fontWeight: 600, color: "#64748B",
-            letterSpacing: "0.08em", textTransform: "uppercase" }}>
-            Phrase de Récupération (12 mots)
-          </label>
-          <button onClick={() => setRevealed(!revealed)} style={{
-            background: "none", border: "none", cursor: "pointer",
-            fontSize: 11, color: "#00B4D8", fontWeight: 600
-          }}>
-            {revealed ? "Masquer" : "Afficher"}
-          </button>
-        </div>
-        {revealed ? (
-          <div style={{ position: "relative" }}>
-            <div style={{
-              display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6,
-              background: "rgba(0,0,0,0.25)", border: "1px solid rgba(0,180,216,0.2)",
-              borderRadius: 10, padding: 14
-            }}>
-              {wallet.mnemonic.split(" ").map((word, i) => (
-                <div key={i} style={{
-                  background: "rgba(0,180,216,0.06)", borderRadius: 6,
-                  padding: "5px 8px", display: "flex", alignItems: "center", gap: 6
-                }}>
-                  <span style={{ fontSize: 10, color: "#475569", minWidth: 16 }}>{i + 1}.</span>
-                  <span style={{ fontSize: 12, color: "#E2E8F0", fontFamily: "'DM Mono', monospace" }}>
-                    {word}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <button onClick={() => copy("mnem", wallet.mnemonic)} style={{
-              position: "absolute", top: 10, right: 10, background: "none", border: "none",
-              cursor: "pointer", color: copied.mnem ? "#10B981" : "#64748B"
-            }}>
-              {copied.mnem ? <CheckIcon /> : <CopyIcon />}
-            </button>
-          </div>
-        ) : (
-          <div style={{
-            background: "rgba(0,0,0,0.25)", border: "1px solid rgba(0,180,216,0.15)",
-            borderRadius: 10, padding: 20, textAlign: "center",
-            color: "#475569", fontSize: 12, cursor: "pointer"
-          }} onClick={() => setRevealed(true)}>
-            🔒 Cliquez sur "Afficher" pour révéler
-          </div>
-        )}
-      </div>
-
-      {/* Private key */}
-      <div style={{ marginBottom: 24 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: "#64748B",
-          letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>
-          Clé Privée
-        </label>
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10,
-          background: "rgba(248,113,113,0.04)", border: "1px solid rgba(248,113,113,0.2)",
-          borderRadius: 10, padding: "10px 14px"
-        }}>
-          <span style={{
-            fontSize: 12, color: "#F87171", fontFamily: "'DM Mono', monospace",
-            flex: 1, wordBreak: "break-all",
-            filter: revealed ? "none" : "blur(6px)", transition: "filter 0.3s",
-            userSelect: revealed ? "text" : "none"
-          }}>
-            {wallet.privateKey}
-          </span>
-          <button onClick={() => copy("pk", wallet.privateKey)} style={{
-            background: "none", border: "none", cursor: "pointer",
-            color: copied.pk ? "#10B981" : "#64748B", flexShrink: 0
-          }}>
-            {copied.pk ? <CheckIcon /> : <CopyIcon />}
-          </button>
-        </div>
-      </div>
+      <DataRow label="// ARC Network Address" value={wallet.address} copyKey="addr" />
+      <DataRow
+        label="// Recovery Phrase (BIP-39)"
+        value={wallet.mnemonic}
+        copyKey="mnem"
+        blurred={true}
+        revealed={showMnem}
+        onReveal={() => setShowMnem(!showMnem)}
+      />
+      <DataRow
+        label="// Private Key — NEVER SHARE"
+        value={wallet.privateKey}
+        copyKey="pk"
+        blurred={true}
+        revealed={showPk}
+        onReveal={() => setShowPk(!showPk)}
+      />
 
       <button onClick={onContinue} style={{
-        width: "100%", padding: "14px 0",
-        background: "linear-gradient(135deg, #00B4D8, #0077B6)",
-        border: "none", borderRadius: 12, color: "#fff",
-        fontSize: 15, fontWeight: 700, cursor: "pointer",
-        fontFamily: "'Syne', sans-serif", letterSpacing: "0.04em",
-        boxShadow: "0 4px 20px rgba(0,180,216,0.35)",
-        transition: "transform 0.15s, box-shadow 0.15s"
+        width: "100%", marginTop: 8,
+        padding: "13px 0",
+        background: "transparent",
+        border: "1px solid #00FFB0",
+        borderRadius: 3, color: "#00FFB0",
+        fontSize: 12, fontWeight: 700, cursor: "pointer",
+        fontFamily: "'JetBrains Mono', monospace", letterSpacing: "0.15em",
+        boxShadow: "0 0 20px rgba(0,255,176,0.1), inset 0 0 20px rgba(0,255,176,0.03)",
+        transition: "all 0.2s",
+        textTransform: "uppercase"
       }}
-        onMouseEnter={e => { e.target.style.transform = "translateY(-1px)"; e.target.style.boxShadow = "0 6px 24px rgba(0,180,216,0.45)"; }}
-        onMouseLeave={e => { e.target.style.transform = "none"; e.target.style.boxShadow = "0 4px 20px rgba(0,180,216,0.35)"; }}
+        onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,255,176,0.08)"; e.currentTarget.style.boxShadow = "0 0 30px rgba(0,255,176,0.2), inset 0 0 30px rgba(0,255,176,0.05)"; }}
+        onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.boxShadow = "0 0 20px rgba(0,255,176,0.1), inset 0 0 20px rgba(0,255,176,0.03)"; }}
       >
-        Accéder à PrivARC →
+        ⟶ Launch PrivARC OS
       </button>
     </div>
   );
 }
 
-// ── Dashboard preview ─────────────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════════
+   DASHBOARD
+═══════════════════════════════════════════════════════════════ */
 function Dashboard({ user, wallet }) {
+  const [tick, setTick] = useState(0);
+  const [agentLogs, setAgentLogs] = useState([
+    { t: "00:00:01", msg: "ShieldAgent :: Monitoring deposit pool", col: "#00FFB0" },
+    { t: "00:00:03", msg: "SwapAgent :: DEX liquidity scan complete", col: "#4ADE80" },
+    { t: "00:00:07", msg: "RiskAgent :: Volatility index: LOW", col: "#4ADE80" },
+    { t: "00:00:12", msg: "ZKAgent :: Proof batch ready (0 pending)", col: "#4ADE80" },
+  ]);
+
+  const AGENTS = [
+    { id: "SA", name: "ShieldAgent", status: "ACTIVE", load: 12 },
+    { id: "SW", name: "SwapAgent", status: "ACTIVE", load: 8 },
+    { id: "PV", name: "PrivacyAgent", status: "ACTIVE", load: 34 },
+    { id: "RK", name: "RiskAgent", status: "ACTIVE", load: 5 },
+    { id: "ZK", name: "ZKAgent", status: "ACTIVE", load: 67 },
+    { id: "BR", name: "BridgeAgent", status: "STANDBY", load: 0 },
+    { id: "GO", name: "GovAgent", status: "ACTIVE", load: 2 },
+    { id: "FE", name: "FeeAgent", status: "ACTIVE", load: 18 },
+  ];
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick(t => t + 1);
+      if (Math.random() > 0.55) {
+        const msgs = [
+          ["ZKAgent :: New proof generated", "#00FFB0"],
+          ["ShieldAgent :: Pool depth nominal", "#4ADE80"],
+          ["FeeAgent :: Fee sweep: 0.00 USDC", "#4ADE80"],
+          ["PrivacyAgent :: Stealth scan — 0 new notes", "#4ADE80"],
+          ["RiskAgent :: On-chain anomaly score: 0.02", "#4ADE80"],
+          ["SwapAgent :: Slippage within bounds", "#4ADE80"],
+          ["BridgeAgent :: Cross-chain bridge idle", "#1E5C3A"],
+          ["GovAgent :: No pending proposals", "#1E5C3A"],
+        ];
+        const [msg, col] = msgs[Math.floor(Math.random() * msgs.length)];
+        const now = new Date();
+        const t = [now.getHours(), now.getMinutes(), now.getSeconds()]
+          .map(n => String(n).padStart(2, "0")).join(":");
+        setAgentLogs(p => [...p.slice(-6), { t, msg, col }]);
+      }
+    }, 1800);
+    return () => clearInterval(id);
+  }, []);
+
+  const ACTIONS = [
+    { icon: "🛡", label: "SHIELD", desc: "Deposit private" },
+    { icon: "⇄", label: "SWAP", desc: "Private exchange" },
+    { icon: "↗", label: "SEND", desc: "Private transfer" },
+    { icon: "↙", label: "WITHDRAW", desc: "Public exit" },
+    { icon: "⟺", label: "BRIDGE", desc: "Cross-chain" },
+  ];
+
   return (
-    <div style={{ animation: "fadeUp 0.5s ease forwards" }}>
-      <div style={{ textAlign: "center", marginBottom: 30 }}>
-        <div style={{
-          width: 56, height: 56, borderRadius: "50%",
-          background: "linear-gradient(135deg, #00B4D8, #0077B6)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          margin: "0 auto 12px", fontSize: 22, fontWeight: 700, color: "#fff",
-          fontFamily: "'Syne', sans-serif"
-        }}>
-          {user.name ? user.name[0].toUpperCase() : "P"}
-        </div>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#F1F5F9",
-          fontFamily: "'Syne', sans-serif" }}>
-          Bienvenue, {user.name || "Utilisateur"}
-        </h2>
-        <p style={{ margin: "4px 0 0", fontSize: 13, color: "#64748B" }}>{user.email}</p>
-      </div>
-
-      {/* Wallet summary */}
+    <div style={{ animation: "fadeIn 0.4s ease" }}>
+      {/* Header */}
       <div style={{
-        background: "linear-gradient(135deg, rgba(0,180,216,0.1), rgba(0,119,182,0.15))",
-        border: "1px solid rgba(0,180,216,0.25)", borderRadius: 14, padding: 20, marginBottom: 16
+        display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+        marginBottom: 20, paddingBottom: 16,
+        borderBottom: "1px solid rgba(0,255,176,0.08)"
       }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <p style={{ margin: 0, fontSize: 11, color: "#64748B", fontWeight: 600,
-              letterSpacing: "0.08em", textTransform: "uppercase" }}>Wallet ARC Network</p>
-            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#00B4D8",
-              fontFamily: "'DM Mono', monospace" }}>{shortAddr(wallet.address)}</p>
-          </div>
-          <div style={{ color: "#00B4D8" }}><WalletIcon /></div>
+        <div>
+          <div style={{ fontSize: 9, color: "#0F3A22", letterSpacing: "0.2em",
+            fontFamily: "monospace", marginBottom: 4 }}>OPERATOR</div>
+          <div style={{ fontSize: 14, color: "#A7F3D0", fontFamily: "monospace",
+            fontWeight: 700 }}>{user.name || user.email.split("@")[0]}</div>
+          <div style={{ fontSize: 10, color: "#1E5C3A", fontFamily: "monospace",
+            marginTop: 2 }}>{shortAddr(wallet.address)}</div>
         </div>
-        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid rgba(0,180,216,0.1)" }}>
-          <p style={{ margin: 0, fontSize: 11, color: "#64748B" }}>Solde disponible</p>
-          <p style={{ margin: "4px 0 0", fontSize: 24, fontWeight: 700, color: "#F1F5F9",
-            fontFamily: "'Syne', sans-serif" }}>0.00 <span style={{ fontSize: 14, color: "#64748B" }}>USDC</span></p>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginBottom: 4 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#00FFB0",
+              boxShadow: "0 0 6px #00FFB0", animation: "pulse 2s ease infinite" }} />
+            <span style={{ fontSize: 9, color: "#00FFB0", letterSpacing: "0.15em", fontFamily: "monospace" }}>
+              MAINNET
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "#0F3A22", fontFamily: "monospace" }}>ARC Network</div>
         </div>
       </div>
 
-      {/* Quick actions */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        {[
-          { icon: "🛡️", label: "Shield", color: "#00B4D8" },
-          { icon: "🔄", label: "Private Swap", color: "#7C3AED" },
-          { icon: "📤", label: "Private Send", color: "#10B981" },
-          { icon: "📥", label: "Withdraw", color: "#F59E0B" },
-        ].map(({ icon, label, color }) => (
-          <button key={label} style={{
-            background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 12, padding: "14px 10px", cursor: "pointer",
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-            transition: "border-color 0.2s, background 0.2s"
+      {/* Balance */}
+      <div style={{
+        background: "rgba(0,255,176,0.03)",
+        border: "1px solid rgba(0,255,176,0.12)",
+        borderRadius: 4, padding: "16px 18px", marginBottom: 16
+      }}>
+        <div style={{ fontSize: 9, color: "#0F3A22", letterSpacing: "0.2em",
+          fontFamily: "monospace", marginBottom: 8 }}>SHIELDED BALANCE</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 700, color: "#00FFB0",
+            fontFamily: "monospace", lineHeight: 1 }}>0.00</span>
+          <span style={{ fontSize: 13, color: "#1E5C3A", fontFamily: "monospace" }}>USDC</span>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 10, color: "#0F3A22", fontFamily: "monospace" }}>
+          ≈ $0.00 USD · Fees: 0.00 USDC total paid
+        </div>
+      </div>
+
+      {/* Actions grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6, marginBottom: 16 }}>
+        {ACTIONS.map(a => (
+          <button key={a.label} style={{
+            background: "rgba(0,255,176,0.03)",
+            border: "1px solid rgba(0,255,176,0.1)",
+            borderRadius: 4, padding: "10px 4px",
+            cursor: "pointer", textAlign: "center",
+            transition: "all 0.2s"
           }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = color + "55"; e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"; e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(0,255,176,0.35)"; e.currentTarget.style.background = "rgba(0,255,176,0.07)"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(0,255,176,0.1)"; e.currentTarget.style.background = "rgba(0,255,176,0.03)"; }}
           >
-            <span style={{ fontSize: 20 }}>{icon}</span>
-            <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 500 }}>{label}</span>
+            <div style={{ fontSize: 18, marginBottom: 4 }}>{a.icon}</div>
+            <div style={{ fontSize: 9, color: "#00FFB0", fontFamily: "monospace",
+              letterSpacing: "0.1em", fontWeight: 700 }}>{a.label}</div>
+            <div style={{ fontSize: 8, color: "#0F3A22", fontFamily: "monospace",
+              marginTop: 2 }}>{a.desc}</div>
           </button>
         ))}
       </div>
 
+      {/* AI Agents */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 9, color: "#0F3A22", letterSpacing: "0.2em",
+          fontFamily: "monospace", marginBottom: 8 }}>AI AGENT CLUSTER — 8 NODES</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+          {AGENTS.map(a => (
+            <div key={a.id} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              background: "rgba(0,0,0,0.3)",
+              border: "1px solid rgba(0,255,176,0.06)",
+              borderRadius: 3, padding: "6px 10px"
+            }}>
+              <div style={{
+                width: 5, height: 5, borderRadius: "50%",
+                background: a.status === "ACTIVE" ? "#00FFB0" : "#1E5C3A",
+                flexShrink: 0,
+                boxShadow: a.status === "ACTIVE" ? "0 0 5px #00FFB0" : "none"
+              }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 9, color: "#1E5C3A", fontFamily: "monospace",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {a.name}
+                </div>
+              </div>
+              <div style={{ fontSize: 8, color: a.status === "ACTIVE" ? "#00FFB0" : "#0F3A22",
+                fontFamily: "monospace", flexShrink: 0 }}>
+                {a.load > 0 ? `${a.load}%` : "---"}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Agent log */}
       <div style={{
-        background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)",
-        borderRadius: 10, padding: "10px 14px",
-        display: "flex", gap: 10, alignItems: "center"
+        background: "#000A06",
+        border: "1px solid rgba(0,255,176,0.08)",
+        borderRadius: 3, padding: "10px 12px",
+        maxHeight: 110, overflow: "hidden"
       }}>
-        <span style={{ fontSize: 16 }}>🟢</span>
-        <p style={{ margin: 0, fontSize: 12, color: "#6EE7B7" }}>
-          Connecté à <strong>ARC Testnet</strong> — Protocole actif
-        </p>
+        <div style={{ fontSize: 9, color: "#0F3A22", letterSpacing: "0.2em",
+          fontFamily: "monospace", marginBottom: 6 }}>SYSTEM LOG</div>
+        {agentLogs.slice(-5).map((l, i) => (
+          <div key={i} style={{
+            fontSize: 10, fontFamily: "monospace", marginBottom: 3,
+            color: l.col, lineHeight: 1.4,
+            animation: i === agentLogs.slice(-5).length - 1 ? "fadeIn 0.3s ease" : "none"
+          }}>
+            <span style={{ color: "#0A1F14", marginRight: 8 }}>[{l.t}]</span>{l.msg}
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  MAIN COMPONENT
-// ══════════════════════════════════════════════════════════════════════════════
-export default function PrivARCAuth() {
-  const [mode, setMode] = useState("login"); // login | signup | wallet | dashboard
+/* ═══════════════════════════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════════════════════════ */
+export default function PrivARCOS() {
+  const [booted, setBooted] = useState(false);
+  const [screen, setScreen] = useState("login"); // login | signup | wallet | dashboard
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [user, setUser] = useState(null);
 
-  // Form fields
-  const [name, setName]         = useState("");
-  const [email, setEmail]       = useState("");
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm]   = useState("");
-  const [errors, setErrors]     = useState({});
-  const [agreed, setAgreed]     = useState(false);
+  const [name, setName]     = useState("");
+  const [email, setEmail]   = useState("");
+  const [pw, setPw]         = useState("");
+  const [cpw, setCpw]       = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [errors, setErrors] = useState({});
 
   const validate = () => {
     const e = {};
-    if (mode === "signup" && !name.trim()) e.name = "Nom requis";
-    if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) e.email = "Adresse email invalide";
-    if (!password) e.password = "Mot de passe requis";
-    if (mode === "signup") {
-      if (password.length < 8) e.password = "Minimum 8 caractères";
-      if (password !== confirm) e.confirm = "Les mots de passe ne correspondent pas";
-      if (!agreed) e.agreed = "Vous devez accepter les conditions";
+    if (screen === "signup" && !name.trim()) e.name = "Required";
+    if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) e.email = "Invalid email";
+    if (!pw || pw.length < 8) e.pw = "Min 8 chars";
+    if (screen === "signup") {
+      if (pw !== cpw) e.cpw = "Mismatch";
+      if (!agreed) e.agreed = "Required";
     }
     return e;
   };
 
-  const handleSubmit = () => {
+  const submit = () => {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
     setErrors({});
     setLoading(true);
-
     setTimeout(() => {
       setLoading(false);
-      if (mode === "login") {
-        setUser({ name: "Utilisateur", email });
-        setWallet(generateWallet());
-        setMode("dashboard");
-      } else {
-        const w = generateWallet();
-        setWallet(w);
-        setUser({ name, email });
-        setMode("wallet");
-      }
-    }, 1600);
+      const w = generateWallet();
+      setWallet(w);
+      setUser({ name: name || email.split("@")[0], email });
+      if (screen === "signup") setScreen("wallet");
+      else setScreen("dashboard");
+    }, screen === "login" ? 1200 : 1600);
   };
 
-  const switchMode = (m) => {
-    setMode(m); setErrors({});
-    setName(""); setEmail(""); setPassword(""); setConfirm(""); setAgreed(false);
+  const reset = (s) => {
+    setScreen(s); setErrors({});
+    setName(""); setEmail(""); setPw(""); setCpw(""); setAgreed(false);
   };
+
+  const isLogin = screen === "login";
 
   return (
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@700;800&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #060B14; }
-        input::placeholder { color: #334155; }
-        @keyframes fadeUp {
-          from { opacity: 0; transform: translateY(16px); }
-          to   { opacity: 1; transform: translateY(0); }
+        body { background: #000A06; overflow-x: hidden; }
+        input { font-family: 'JetBrains Mono', monospace !important; }
+        input::placeholder { color: #0A1F14 !important; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(12px);} to {opacity:1; transform:none;} }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes pulse { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:0.6; transform:scale(0.9)} }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes glitch1 {
+          0%,89%,100%{opacity:0} 90%{opacity:0.8; transform:translateX(-3px)} 95%{opacity:0; transform:translateX(3px)}
         }
-        @keyframes spin {
-          to { transform: rotate(360deg); }
+        @keyframes glitch2 {
+          0%,93%,100%{opacity:0} 94%{opacity:0.6; transform:translateX(3px)} 98%{opacity:0; transform:translateX(-2px)}
         }
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.5; }
-        }
+        ::-webkit-scrollbar { width: 3px; }
+        ::-webkit-scrollbar-track { background: #000A06; }
+        ::-webkit-scrollbar-thumb { background: rgba(0,255,176,0.2); border-radius: 2px; }
       `}</style>
 
-      <Particles />
+      <HexGrid />
+      {!booted && <BootSequence onComplete={() => setBooted(true)} />}
 
       <div style={{
-        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-        fontFamily: "'DM Mono', monospace", padding: "24px 16px",
-        position: "relative", zIndex: 1
+        minHeight: "100vh",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "24px 16px",
+        position: "relative", zIndex: 1,
+        opacity: booted ? 1 : 0, transition: "opacity 0.6s ease 0.2s"
       }}>
-        {/* Card */}
+        {/* Left panel — desktop only */}
+        <div style={{
+          display: "none",
+          flexDirection: "column",
+          justifyContent: "space-between",
+          width: 260, marginRight: 32,
+          padding: "28px 0",
+          "@media(min-width:900px)": { display: "flex" }
+        }} className="left-panel">
+        </div>
+
+        {/* Main card */}
         <div style={{
           width: "100%", maxWidth: 460,
-          background: "rgba(10,18,35,0.85)",
-          backdropFilter: "blur(24px)",
-          border: "1px solid rgba(0,180,216,0.18)",
-          borderRadius: 20,
-          boxShadow: "0 24px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,180,216,0.06) inset",
-          padding: "36px 36px 32px",
-          animation: "fadeUp 0.6s ease forwards"
+          background: "rgba(0,8,5,0.92)",
+          backdropFilter: "blur(20px)",
+          border: "1px solid rgba(0,255,176,0.12)",
+          borderRadius: 4,
+          boxShadow: "0 0 60px rgba(0,255,176,0.04), 0 40px 80px rgba(0,0,0,0.8)",
+          padding: "32px 32px 28px",
+          position: "relative",
+          animation: booted ? "fadeUp 0.6s ease forwards" : "none"
         }}>
-          {/* Logo */}
-          {(mode === "login" || mode === "signup") && (
-            <div style={{ textAlign: "center", marginBottom: 30 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 8 }}>
-                <ArcIcon />
-                <span style={{ fontSize: 26, fontWeight: 800, color: "#F1F5F9",
-                  fontFamily: "'Syne', sans-serif", letterSpacing: "-0.02em" }}>
-                  Priv<span style={{ color: "#00B4D8" }}>ARC</span>
-                </span>
+          {/* Corner decorations */}
+          {["tl","tr","bl","br"].map(pos => (
+            <span key={pos} style={{
+              position: "absolute", zIndex: 2,
+              width: 14, height: 14,
+              borderColor: "rgba(0,255,176,0.25)",
+              borderStyle: "solid", borderWidth: 0,
+              ...(pos === "tl" ? { top: -1, left: -1, borderTopWidth: 1.5, borderLeftWidth: 1.5 } : {}),
+              ...(pos === "tr" ? { top: -1, right: -1, borderTopWidth: 1.5, borderRightWidth: 1.5 } : {}),
+              ...(pos === "bl" ? { bottom: -1, left: -1, borderBottomWidth: 1.5, borderLeftWidth: 1.5 } : {}),
+              ...(pos === "br" ? { bottom: -1, right: -1, borderBottomWidth: 1.5, borderRightWidth: 1.5 } : {}),
+            }} />
+          ))}
+
+          {/* Logo — only on auth screens */}
+          {(screen === "login" || screen === "signup") && (
+            <div style={{ marginBottom: 28 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <div style={{
+                  width: 32, height: 32, border: "1.5px solid #00FFB0",
+                  borderRadius: 3, display: "flex", alignItems: "center",
+                  justifyContent: "center", fontSize: 15, color: "#00FFB0",
+                  boxShadow: "0 0 12px rgba(0,255,176,0.2)"
+                }}>◈</div>
+                <GlitchText text="privARC" style={{
+                  fontSize: 22, fontWeight: 800, color: "#00FFB0",
+                  fontFamily: "'Syne', sans-serif", letterSpacing: "-0.01em"
+                }} />
+                <span style={{
+                  fontSize: 9, color: "#0F3A22", fontFamily: "monospace",
+                  letterSpacing: "0.12em", alignSelf: "flex-end", paddingBottom: 2
+                }}>OS</span>
               </div>
-              <p style={{ fontSize: 12.5, color: "#475569", letterSpacing: "0.06em" }}>
-                PRIVACY LAYER · ARC NETWORK
+              <p style={{
+                fontSize: 10.5, color: "#1E5C3A", fontFamily: "monospace",
+                letterSpacing: "0.06em", lineHeight: 1.6, maxWidth: 340
+              }}>
+                Autonomous crypto operating system for private on-chain capital management — powered by AI agents on ARC Network.
               </p>
             </div>
           )}
 
-          {/* Tabs */}
-          {(mode === "login" || mode === "signup") && (
+          {/* Tab switcher */}
+          {(screen === "login" || screen === "signup") && (
             <div style={{
-              display: "flex", background: "rgba(255,255,255,0.04)",
-              borderRadius: 12, padding: 4, marginBottom: 28
+              display: "flex", gap: 0,
+              border: "1px solid rgba(0,255,176,0.1)",
+              borderRadius: 3, overflow: "hidden", marginBottom: 26
             }}>
-              {["login", "signup"].map(m => (
-                <button key={m} onClick={() => switchMode(m)} style={{
-                  flex: 1, padding: "10px 0",
-                  background: mode === m ? "rgba(0,180,216,0.18)" : "none",
-                  border: mode === m ? "1px solid rgba(0,180,216,0.35)" : "1px solid transparent",
-                  borderRadius: 9, color: mode === m ? "#00B4D8" : "#475569",
-                  fontSize: 13, fontWeight: 600, cursor: "pointer",
-                  fontFamily: "'Syne', sans-serif", transition: "all 0.2s"
+              {["login", "signup"].map(s => (
+                <button key={s} onClick={() => reset(s)} style={{
+                  flex: 1, padding: "9px 0",
+                  background: screen === s ? "rgba(0,255,176,0.08)" : "transparent",
+                  border: "none",
+                  borderRight: s === "login" ? "1px solid rgba(0,255,176,0.1)" : "none",
+                  color: screen === s ? "#00FFB0" : "#1E5C3A",
+                  fontSize: 10, fontWeight: 700, cursor: "pointer",
+                  fontFamily: "monospace", letterSpacing: "0.15em",
+                  textTransform: "uppercase", transition: "all 0.2s"
                 }}>
-                  {m === "login" ? "Connexion" : "Inscription"}
+                  {s === "login" ? "[ AUTH ]" : "[ REGISTER ]"}
                 </button>
               ))}
             </div>
           )}
 
-          {/* ── LOGIN ── */}
-          {mode === "login" && (
-            <div style={{ animation: "fadeUp 0.35s ease forwards" }}>
-              <Field label="Adresse email" type="email" value={email}
-                onChange={e => setEmail(e.target.value)} placeholder="vous@exemple.com"
-                icon={<MailIcon />} error={errors.email} />
-              <Field label="Mot de passe" type="password" value={password}
-                onChange={e => setPassword(e.target.value)} placeholder="••••••••"
-                icon={<LockIcon />} error={errors.password} />
+          {/* LOGIN */}
+          {screen === "login" && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              <OsField label="EMAIL" type="email" value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="operator@privarc.io" icon="✉" error={errors.email} />
+              <OsField label="PASSPHRASE" type="password" value={pw}
+                onChange={e => setPw(e.target.value)}
+                placeholder="••••••••••••" icon="⚿" error={errors.pw} />
 
               <div style={{ textAlign: "right", marginTop: -10, marginBottom: 20 }}>
-                <a href="#" style={{ fontSize: 12, color: "#00B4D8", textDecoration: "none" }}>
-                  Mot de passe oublié ?
+                <a href="#" style={{ fontSize: 9, color: "#1E5C3A", textDecoration: "none",
+                  fontFamily: "monospace", letterSpacing: "0.1em",
+                  transition: "color 0.2s" }}
+                  onMouseEnter={e => e.target.style.color="#00FFB0"}
+                  onMouseLeave={e => e.target.style.color="#1E5C3A"}>
+                  RECOVER ACCESS →
                 </a>
               </div>
 
-              <button onClick={handleSubmit} disabled={loading} style={{
-                width: "100%", padding: "14px 0",
-                background: loading ? "rgba(0,180,216,0.3)" : "linear-gradient(135deg, #00B4D8, #0077B6)",
-                border: "none", borderRadius: 12, color: "#fff",
-                fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
-                fontFamily: "'Syne', sans-serif", letterSpacing: "0.04em",
-                boxShadow: loading ? "none" : "0 4px 20px rgba(0,180,216,0.35)",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 10
-              }}>
-                {loading ? (
-                  <>
-                    <span style={{ width: 18, height: 18, border: "2px solid rgba(255,255,255,0.3)",
-                      borderTop: "2px solid #fff", borderRadius: "50%",
-                      animation: "spin 0.7s linear infinite", display: "inline-block" }} />
-                    Connexion…
-                  </>
-                ) : "Se connecter"}
-              </button>
-
-              <div style={{ margin: "24px 0", display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.07)" }} />
-                <span style={{ fontSize: 11, color: "#475569" }}>ou</span>
-                <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.07)" }} />
-              </div>
-
-              {/* Web3 login */}
-              <button style={{
-                width: "100%", padding: "12px 0",
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 12, color: "#94A3B8",
-                fontSize: 13, fontWeight: 500, cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
-                transition: "border-color 0.2s, color 0.2s"
+              <button onClick={submit} disabled={loading} style={{
+                width: "100%", padding: "13px 0",
+                background: "transparent",
+                border: `1px solid ${loading ? "rgba(0,255,176,0.2)" : "#00FFB0"}`,
+                borderRadius: 3, color: loading ? "#1E5C3A" : "#00FFB0",
+                fontSize: 11, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
+                fontFamily: "monospace", letterSpacing: "0.2em",
+                boxShadow: loading ? "none" : "0 0 20px rgba(0,255,176,0.1)",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
+                transition: "all 0.2s", textTransform: "uppercase"
               }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(0,180,216,0.3)"; e.currentTarget.style.color = "#E2E8F0"; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; e.currentTarget.style.color = "#94A3B8"; }}
+                onMouseEnter={e => !loading && (e.currentTarget.style.background = "rgba(0,255,176,0.07)")}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}
               >
-                <WalletIcon /> Connecter un wallet existant
-              </button>
-            </div>
-          )}
-
-          {/* ── SIGNUP ── */}
-          {mode === "signup" && (
-            <div style={{ animation: "fadeUp 0.35s ease forwards" }}>
-              <Field label="Nom complet" type="text" value={name}
-                onChange={e => setName(e.target.value)} placeholder="Jean Dupont"
-                icon={<UserIcon />} error={errors.name} />
-              <Field label="Adresse email" type="email" value={email}
-                onChange={e => setEmail(e.target.value)} placeholder="vous@exemple.com"
-                icon={<MailIcon />} error={errors.email} />
-              <Field label="Mot de passe" type="password" value={password}
-                onChange={e => setPassword(e.target.value)} placeholder="Minimum 8 caractères"
-                icon={<LockIcon />} error={errors.password} />
-              <PasswordStrength password={password} />
-              <Field label="Confirmer le mot de passe" type="password" value={confirm}
-                onChange={e => setConfirm(e.target.value)} placeholder="••••••••"
-                icon={<LockIcon />} error={errors.confirm} />
-
-              {/* Info box */}
-              <div style={{
-                background: "rgba(0,180,216,0.06)", border: "1px solid rgba(0,180,216,0.2)",
-                borderRadius: 10, padding: "12px 14px", marginBottom: 18,
-                display: "flex", gap: 10, alignItems: "flex-start"
-              }}>
-                <span style={{ color: "#00B4D8", marginTop: 1 }}><ShieldIcon /></span>
-                <div>
-                  <p style={{ margin: 0, fontSize: 12, color: "#94A3B8", lineHeight: 1.5 }}>
-                    Un <strong style={{ color: "#00B4D8" }}>wallet ARC Network</strong> sera
-                    automatiquement généré et lié à votre compte. Vous recevrez votre
-                    adresse, clé privée et phrase mnémonique.
-                  </p>
-                </div>
-              </div>
-
-              {/* Checkbox */}
-              <label style={{
-                display: "flex", alignItems: "flex-start", gap: 10,
-                cursor: "pointer", marginBottom: errors.agreed ? 4 : 20
-              }}>
-                <div onClick={() => setAgreed(!agreed)} style={{
-                  width: 18, height: 18, borderRadius: 5, flexShrink: 0, marginTop: 1,
-                  background: agreed ? "#00B4D8" : "transparent",
-                  border: `2px solid ${agreed ? "#00B4D8" : "rgba(0,180,216,0.3)"}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  transition: "all 0.2s", cursor: "pointer"
-                }}>
-                  {agreed && <CheckIcon />}
-                </div>
-                <span style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5 }}>
-                  J'accepte les{" "}
-                  <a href="#" style={{ color: "#00B4D8", textDecoration: "none" }}>conditions d'utilisation</a>
-                  {" "}et la{" "}
-                  <a href="#" style={{ color: "#00B4D8", textDecoration: "none" }}>politique de confidentialité</a>
-                </span>
-              </label>
-              {errors.agreed && (
-                <p style={{ fontSize: 11.5, color: "#F87171", marginBottom: 14, marginLeft: 28 }}>
-                  {errors.agreed}
-                </p>
-              )}
-
-              <button onClick={handleSubmit} disabled={loading} style={{
-                width: "100%", padding: "14px 0",
-                background: loading ? "rgba(0,180,216,0.3)" : "linear-gradient(135deg, #00B4D8, #0077B6)",
-                border: "none", borderRadius: 12, color: "#fff",
-                fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
-                fontFamily: "'Syne', sans-serif", letterSpacing: "0.04em",
-                boxShadow: loading ? "none" : "0 4px 20px rgba(0,180,216,0.35)",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 10
-              }}>
                 {loading ? (
                   <>
-                    <span style={{ width: 18, height: 18, border: "2px solid rgba(255,255,255,0.3)",
-                      borderTop: "2px solid #fff", borderRadius: "50%",
+                    <span style={{ width: 14, height: 14, border: "1.5px solid rgba(0,255,176,0.2)",
+                      borderTop: "1.5px solid #00FFB0", borderRadius: "50%",
                       animation: "spin 0.7s linear infinite", display: "inline-block" }} />
-                    Génération du wallet…
+                    Authenticating...
                   </>
-                ) : "Créer mon compte & wallet"}
+                ) : "⟶ Authenticate"}
+              </button>
+
+              <div style={{ margin: "20px 0", display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, height: 1, background: "rgba(0,255,176,0.05)" }} />
+                <span style={{ fontSize: 9, color: "#0A1F14", fontFamily: "monospace" }}>OR</span>
+                <div style={{ flex: 1, height: 1, background: "rgba(0,255,176,0.05)" }} />
+              </div>
+
+              <button style={{
+                width: "100%", padding: "11px 0",
+                background: "transparent",
+                border: "1px solid rgba(0,255,176,0.08)",
+                borderRadius: 3, color: "#0F3A22",
+                fontSize: 10, cursor: "pointer",
+                fontFamily: "monospace", letterSpacing: "0.12em",
+                transition: "all 0.2s", textTransform: "uppercase"
+              }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(0,255,176,0.2)"; e.currentTarget.style.color = "#1E5C3A"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(0,255,176,0.08)"; e.currentTarget.style.color = "#0F3A22"; }}
+              >
+                ⬡ Connect existing wallet
               </button>
             </div>
           )}
 
-          {/* ── WALLET REVEAL ── */}
-          {mode === "wallet" && wallet && (
-            <WalletCard wallet={wallet} onContinue={() => setMode("dashboard")} />
+          {/* SIGNUP */}
+          {screen === "signup" && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              <OsField label="OPERATOR NAME" type="text" value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Your name" icon="⊹" error={errors.name} />
+              <OsField label="EMAIL" type="email" value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="operator@privarc.io" icon="✉" error={errors.email} />
+              <OsField label="PASSPHRASE" type="password" value={pw}
+                onChange={e => setPw(e.target.value)}
+                placeholder="Min 8 characters" icon="⚿" error={errors.pw} />
+              <PassStrength pw={pw} />
+              <OsField label="CONFIRM PASSPHRASE" type="password" value={cpw}
+                onChange={e => setCpw(e.target.value)}
+                placeholder="Repeat passphrase" icon="⚿" error={errors.cpw} />
+
+              {/* Wallet generation notice */}
+              <div style={{
+                border: "1px solid rgba(0,255,176,0.12)",
+                borderRadius: 3, background: "rgba(0,255,176,0.02)",
+                padding: "10px 12px", marginBottom: 16
+              }}>
+                <div style={{ fontSize: 9, color: "#00FFB0", letterSpacing: "0.15em",
+                  fontFamily: "monospace", marginBottom: 4 }}>AUTO WALLET INIT</div>
+                <p style={{ fontSize: 10, color: "#0F3A22", fontFamily: "monospace", lineHeight: 1.5 }}>
+                  An ARC Network wallet will be generated and secured with your passphrase.
+                  You will receive your private key and 12-word recovery phrase.
+                </p>
+              </div>
+
+              {/* Agreement */}
+              <div style={{ marginBottom: errors.agreed ? 4 : 20 }}>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}>
+                  <div onClick={() => setAgreed(!agreed)} style={{
+                    width: 16, height: 16, border: `1px solid ${agreed ? "#00FFB0" : "rgba(0,255,176,0.2)"}`,
+                    borderRadius: 2, flexShrink: 0, marginTop: 1,
+                    background: agreed ? "rgba(0,255,176,0.12)" : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer", transition: "all 0.2s",
+                    color: "#00FFB0", fontSize: 11
+                  }}>
+                    {agreed && "✓"}
+                  </div>
+                  <span style={{ fontSize: 10, color: "#0F3A22", fontFamily: "monospace", lineHeight: 1.5 }}>
+                    I accept the{" "}
+                    <a href="#" style={{ color: "#1E5C3A", textDecoration: "none" }}
+                      onMouseEnter={e=>e.target.style.color="#00FFB0"}
+                      onMouseLeave={e=>e.target.style.color="#1E5C3A"}>Terms of Service</a>
+                    {" "}and{" "}
+                    <a href="#" style={{ color: "#1E5C3A", textDecoration: "none" }}
+                      onMouseEnter={e=>e.target.style.color="#00FFB0"}
+                      onMouseLeave={e=>e.target.style.color="#1E5C3A"}>Privacy Policy</a>
+                  </span>
+                </label>
+                {errors.agreed && <div style={{ fontSize: 10, color: "#EF4444",
+                  fontFamily: "monospace", marginTop: 4, marginLeft: 26 }}>Required</div>}
+              </div>
+
+              <button onClick={submit} disabled={loading} style={{
+                width: "100%", padding: "13px 0",
+                background: "transparent",
+                border: `1px solid ${loading ? "rgba(0,255,176,0.2)" : "#00FFB0"}`,
+                borderRadius: 3, color: loading ? "#1E5C3A" : "#00FFB0",
+                fontSize: 11, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
+                fontFamily: "monospace", letterSpacing: "0.18em",
+                boxShadow: loading ? "none" : "0 0 20px rgba(0,255,176,0.1)",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
+                transition: "all 0.2s", textTransform: "uppercase"
+              }}
+                onMouseEnter={e => !loading && (e.currentTarget.style.background = "rgba(0,255,176,0.07)")}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+              >
+                {loading ? (
+                  <>
+                    <span style={{ width: 14, height: 14, border: "1.5px solid rgba(0,255,176,0.2)",
+                      borderTop: "1.5px solid #00FFB0", borderRadius: "50%",
+                      animation: "spin 0.7s linear infinite", display: "inline-block" }} />
+                    Initializing wallet...
+                  </>
+                ) : "⟶ Create account & wallet"}
+              </button>
+            </div>
           )}
 
-          {/* ── DASHBOARD ── */}
-          {mode === "dashboard" && user && wallet && (
+          {/* WALLET REVEAL */}
+          {screen === "wallet" && wallet && (
+            <WalletReveal wallet={wallet} onContinue={() => setScreen("dashboard")} />
+          )}
+
+          {/* DASHBOARD */}
+          {screen === "dashboard" && user && wallet && (
             <Dashboard user={user} wallet={wallet} />
           )}
 
-          {/* Footer */}
-          {(mode === "login" || mode === "signup") && (
-            <p style={{ textAlign: "center", marginTop: 24, fontSize: 11.5, color: "#334155" }}>
-              <LockIcon style={{ verticalAlign: "middle" }} />{" "}
-              Connexion sécurisée · ARC Network · USDC fees
-            </p>
+          {/* Status bar */}
+          {(screen === "login" || screen === "signup") && (
+            <div style={{
+              marginTop: 24, paddingTop: 14,
+              borderTop: "1px solid rgba(0,255,176,0.06)",
+              display: "flex", justifyContent: "space-between",
+              alignItems: "center"
+            }}>
+              <span style={{ fontSize: 9, color: "#0A1F14", fontFamily: "monospace", letterSpacing: "0.1em" }}>
+                🔒 TLS 1.3 · ZK-secure
+              </span>
+              <span style={{ fontSize: 9, color: "#0A1F14", fontFamily: "monospace", letterSpacing: "0.1em" }}>
+                USDC FEES · ARC NETWORK
+              </span>
+            </div>
           )}
         </div>
       </div>
