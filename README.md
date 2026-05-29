@@ -1,12 +1,11 @@
-# PrivARC v5
+# PrivARC v6
 
 Run: `npm install && npm run dev`
 Deploy: GitHub → vercel.com → Vite
 
-## Features v5
-- Full OS sidebar (14 panels)
-- Overview, Shield, Swap, Send, Withdraw, Bridge
-- Portfolio (donut chart), AI Agents, History, Settings
-- Staking panel with lock multipliers
-- On-chain governance voting (PIP proposals)
-- Block counter, agent live log
+## Features v6
+- Analytics dashboard (TVL sparklines, TX heatmap)
+- ZK Proof Console (Groth16 + PLONK, proof history)
+- Governance module (vote FOR/AGAINST/ABSTAIN, delegate, create proposal)
+- Staking with lock periods + compound projection chart
+- All v5 features included
