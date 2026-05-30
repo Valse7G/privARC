@@ -861,12 +861,6 @@ function Dashboard({ user, prices, changes }) {
 
 /* ═══════════════════════════════════════════════════════════════
    AUTH CARD
-═══════════════════════════════════════════════════════════════ */
-function PassStr({ pw }) {
-  if (!pw) return null;
-  const s=[pw.length>=8,/[A-Z]/.test(pw),/[0-9]/.test(pw),/[^A-Za-z0-9]/.test(pw)].filter(Boolean).length;
-  const C=["","#EF4444","#F59E0B","#3B82F6","#00FFB0"],L=["","WEAK","FAIR","GOOD","STRONG"];
-  return <div style={{marginTop:-4,marginBottom:9}}><div style={{display:"flex",gap:3}}>{[1,2,3,4].map(i=><div key={i} style={{flex:1,height:2,background:i<=s?C[s]:"#0A1F14",transition:"background .3s"}}/>)}</div><div style={{marginTop:2,fontSize:7,color:C[s],letterSpacing:".1em"}}>ENTROPY: {L[s]}</div></div>;
 }
 
 function AuthCard({ onAuth }) {
