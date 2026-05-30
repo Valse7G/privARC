@@ -1,6 +1,6 @@
 {
-  "name": "privarc-v8",
-  "version": "2.4.1",
+  "name": "privarc-v9",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "vite",
