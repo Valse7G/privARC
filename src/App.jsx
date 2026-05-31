@@ -7,7 +7,7 @@ import { useState, useEffect, useRef, useCallback, createContext, useContext, us
 ═══════════════════════════════════════════════════════════════ */
 const ARC_TESTNET = {
   id:        5042002,
-  hexId:     "0x4CEB12",       // 5042002 in hex
+  hexId:     "0x4cef52",       // 5042002 in hex — VERIFIED: hex(5042002) = 0x4cef52
   name:      "Arc Testnet",
   shortName: "ARC-TEST",
   rpcUrl:    "https://rpc.testnet.arc.network",
@@ -100,23 +100,54 @@ async function getChainId() {
   return parseInt(raw, 16);
 }
 
-// Switch or add ARC Testnet
+// Build the addEthereumChain payload — strictly EIP-3085 compliant
+// chainId MUST be lowercase hex string matching exactly the integer
+// Some wallets (TokenPocket, Trust) validate chainId integer vs hex strictly
+const ARC_TESTNET_CHAIN_PARAMS = {
+  chainId:          "0x4cef52",          // hex(5042002) — verified
+  chainName:        "Arc Testnet",
+  nativeCurrency:   { name: "USDC", symbol: "USDC", decimals: 18 },
+  rpcUrls:          ["https://rpc.testnet.arc.network"],
+  blockExplorerUrls:["https://testnet.arcscan.app"],
+};
+
+// Switch or add Arc Testnet — robust for all wallet types
 async function switchToArcTestnet() {
+  const HEX = "0x4cef52"; // hex(5042002)
+
+  // Step 1: try switch first
   try {
-    await rpcCall("wallet_switchEthereumChain", [{ chainId: ARC_TESTNET.hexId }]);
-  } catch (err) {
-    if (err.code === 4902 || err.code === -32603) {
-      // Network not in wallet → add it
-      await rpcCall("wallet_addEthereumChain", [{
-        chainId:          ARC_TESTNET.hexId,
-        chainName:        ARC_TESTNET.name,
-        nativeCurrency:   ARC_TESTNET.currency,
-        rpcUrls:          [ARC_TESTNET.rpcUrl],
-        blockExplorerUrls:[ARC_TESTNET.explorer],
-      }]);
-    } else {
-      throw err;
+    await rpcCall("wallet_switchEthereumChain", [{ chainId: HEX }]);
+    return; // success
+  } catch (switchErr) {
+    // code 4902 = chain not added yet
+    // code -32603 = internal error (some wallets use this instead of 4902)
+    // code -32000 = some mobile wallets
+    const needsAdd = switchErr.code === 4902
+      || switchErr.code === -32603
+      || switchErr.code === -32000
+      || (switchErr.message||"").toLowerCase().includes("unrecognized")
+      || (switchErr.message||"").toLowerCase().includes("unknown")
+      || (switchErr.message||"").toLowerCase().includes("not exist");
+
+    if (!needsAdd) {
+      // User rejected (code 4001) or other real error → rethrow
+      throw switchErr;
     }
+  }
+
+  // Step 2: add chain then switch
+  try {
+    await rpcCall("wallet_addEthereumChain", [ARC_TESTNET_CHAIN_PARAMS]);
+    // After add, some wallets auto-switch, some don't — try switch again
+    try {
+      await rpcCall("wallet_switchEthereumChain", [{ chainId: HEX }]);
+    } catch (_) {
+      // Ignore — wallet may have already switched on addEthereumChain
+    }
+  } catch (addErr) {
+    if (addErr.code === 4001) throw new Error("User rejected network addition");
+    throw addErr;
   }
 }
 
@@ -146,30 +177,76 @@ async function waitForReceipt(txHash, maxAttempts = 30) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   LIVE PRICE FEED  (cosmetic only — USDC is ~$1)
+   LIVE PRICE FEED — Real market prices via CoinGecko public API
+   No API key required. Updates every 30s.
+   Fallback: last known price + tiny noise (USDC stays pegged)
 ═══════════════════════════════════════════════════════════════ */
-const BASE_PRICES = { USDC: 1.0001, WETH: 2597.42, WBTC: 64521.80, ARC: 0.0000 };
+const PRICE_FALLBACK = { USDC: 1.0001, WETH: 2597.42, WBTC: 64521.80 };
+
+const COINGECKO_URL =
+  "https://api.coingecko.com/api/v3/simple/price" +
+  "?ids=usd-coin%2Cethereum%2Cwrapped-bitcoin" +
+  "&vs_currencies=usd&include_24hr_change=true&precision=6";
+
+async function fetchCGPrices() {
+  const res = await fetch(COINGECKO_URL, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const d = await res.json();
+  return {
+    USDC: d["usd-coin"]?.usd         ?? PRICE_FALLBACK.USDC,
+    WETH: d["ethereum"]?.usd         ?? PRICE_FALLBACK.WETH,
+    WBTC: d["wrapped-bitcoin"]?.usd  ?? PRICE_FALLBACK.WBTC,
+    USDC_24h: d["usd-coin"]?.usd_24h_change        ?? 0,
+    WETH_24h: d["ethereum"]?.usd_24h_change        ?? 0,
+    WBTC_24h: d["wrapped-bitcoin"]?.usd_24h_change ?? 0,
+  };
+}
 
 function usePriceFeed() {
-  const [prices, setPrices] = useState(BASE_PRICES);
-  const [changes, setChanges] = useState({});
-  useEffect(() => {
-    const id = setInterval(() => {
-      setPrices(prev => {
-        const next = {}, chgs = {};
-        Object.entries(prev).forEach(([k, v]) => {
-          if (k === "USDC") { next[k] = v; chgs[k] = 0; return; } // USDC stable
-          const d = v * (Math.random() - 0.5) * 0.0016;
-          next[k] = Math.max(0.0001, v + d);
-          chgs[k] = d;
-        });
-        setChanges(chgs);
-        return next;
+  const [prices,      setPrices]      = useState(PRICE_FALLBACK);
+  const [changes,     setChanges]     = useState({ USDC:0, WETH:0, WBTC:0 });
+  const [change24h,   setChange24h]   = useState({ USDC:0, WETH:0, WBTC:0 });
+  const [lastUpdate,  setLastUpdate]  = useState(null);
+  const [priceError,  setPriceError]  = useState(false);
+  const prev = useRef({ ...PRICE_FALLBACK });
+
+  const fetchAndSet = useCallback(async () => {
+    try {
+      const data = await fetchCGPrices();
+      const next = { USDC: data.USDC, WETH: data.WETH, WBTC: data.WBTC };
+      const chgs = {
+        USDC: next.USDC - prev.current.USDC,
+        WETH: next.WETH - prev.current.WETH,
+        WBTC: next.WBTC - prev.current.WBTC,
+      };
+      prev.current = next;
+      setPrices(next);
+      setChanges(chgs);
+      setChange24h({ USDC: data.USDC_24h, WETH: data.WETH_24h, WBTC: data.WBTC_24h });
+      setLastUpdate(new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
+      setPriceError(false);
+    } catch {
+      setPriceError(true);
+      // Animate with tiny noise so ticker doesn't look frozen
+      setPrices(p => {
+        const n = { ...p };
+        ["WETH","WBTC"].forEach(k => { n[k] = p[k] * (1 + (Math.random()-.5)*0.0003); });
+        setChanges({ USDC:0, WETH:n.WETH-p.WETH, WBTC:n.WBTC-p.WBTC });
+        return n;
       });
-    }, 2200);
-    return () => clearInterval(id);
+    }
   }, []);
-  return { prices, changes };
+
+  useEffect(() => {
+    fetchAndSet();                         // Immediate on mount
+    const id = setInterval(fetchAndSet, 30000); // Every 30s
+    return () => clearInterval(id);
+  }, [fetchAndSet]);
+
+  return { prices, changes, change24h, lastUpdate, priceError };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -391,7 +468,7 @@ function ChainBanner() {
 /* ═══════════════════════════════════════════════════════════════
    PRICE TICKER
 ═══════════════════════════════════════════════════════════════ */
-function PriceTicker({ prices, changes }) {
+function PriceTicker({ prices, changes, change24h, lastUpdate, priceError }) {
   const TOKENS = ["USDC", "WETH", "WBTC"];
   const ref = useRef(null);
   useEffect(() => {
@@ -404,27 +481,44 @@ function PriceTicker({ prices, changes }) {
   return (
     <div style={{ overflow:"hidden", background:"rgba(0,0,0,.5)", borderBottom:"1px solid rgba(0,255,176,.08)", height:24, display:"flex", alignItems:"center" }}>
       {/* Testnet badge */}
-      <div style={{ flexShrink:0, padding:"0 14px", fontSize:9, color:"#00FFB0", fontFamily:"monospace", letterSpacing:".12em", borderRight:"1px solid rgba(0,255,176,.12)", height:"100%", display:"flex", alignItems:"center", gap:5 }}>
+      <div style={{ flexShrink:0, padding:"0 12px", fontSize:9, color:"#00FFB0", fontFamily:"monospace", letterSpacing:".12em", borderRight:"1px solid rgba(0,255,176,.12)", height:"100%", display:"flex", alignItems:"center", gap:5 }}>
         <span style={{ width:6, height:6, borderRadius:"50%", background:"#00FFB0", boxShadow:"0 0 5px #00FFB0", animation:"pulse 2s infinite", display:"inline-block" }} />
         ARC TESTNET
       </div>
+      {/* Live prices */}
       <div ref={ref} style={{ display:"flex", whiteSpace:"nowrap", willChange:"transform" }}>
         {items.map((t, i) => {
-          const p = prices[t] || 0; const c = changes[t] || 0; const up = c >= 0;
+          const p = prices[t] || 0;
+          const tick = changes[t] || 0;  // tick-to-tick delta (for up/down arrow)
+          const d24  = change24h?.[t] ?? 0; // 24h % change from CoinGecko
+          const up   = t === "USDC" ? true : tick >= 0;
+          const d24color = d24 >= 0 ? "#00FFB0" : "#f87171";
           return (
-            <span key={i} style={{ fontSize:10, fontFamily:"monospace", padding:"0 16px", color:"#ffffff", borderRight:"1px solid rgba(0,255,176,.06)" }}>
-              <span style={{ color:"#94a3b8", marginRight:5 }}>{t}</span>
-              <span style={{ color:up?"#00FFB0":"#f87171", fontWeight:600 }}>${p < 10 ? p.toFixed(4) : p.toFixed(2)}</span>
-              {t !== "USDC" && <span style={{ color:up?"#00FFB0":"#f87171", marginLeft:4, fontSize:9 }}>{up?"▲":"▼"}{Math.abs(c/p*100).toFixed(3)}%</span>}
+            <span key={i} style={{ fontSize:10, fontFamily:"monospace", padding:"0 16px", color:"#ffffff", borderRight:"1px solid rgba(0,255,176,.06)", display:"inline-flex", alignItems:"center", gap:5 }}>
+              <span style={{ color:"#64748b" }}>{t}</span>
+              <span style={{ color: t === "USDC" ? "#ffffff" : (up ? "#00FFB0" : "#f87171"), fontWeight:600 }}>
+                ${p < 10 ? p.toFixed(4) : p < 1000 ? p.toFixed(2) : p.toFixed(0)}
+              </span>
+              {t !== "USDC" && (
+                <span style={{ fontSize:8, color: d24 >= 0 ? "#00FFB0" : "#f87171" }}>
+                  {d24 >= 0 ? "▲" : "▼"}{Math.abs(d24).toFixed(2)}%
+                </span>
+              )}
             </span>
           );
         })}
       </div>
-      {/* Faucet link */}
-      <div style={{ marginLeft:"auto", flexShrink:0, padding:"0 14px", borderLeft:"1px solid rgba(0,255,176,.08)", height:"100%", display:"flex", alignItems:"center" }}>
+      {/* Source + update time */}
+      <div style={{ marginLeft:"auto", flexShrink:0, padding:"0 10px", borderLeft:"1px solid rgba(0,255,176,.08)", height:"100%", display:"flex", alignItems:"center", gap:8 }}>
+        {priceError
+          ? <span style={{ fontSize:7, color:"#f87171", fontFamily:"monospace" }}>⚠ STALE</span>
+          : <span style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace" }}>
+              CoinGecko {lastUpdate ? `· ${lastUpdate}` : "· loading..."}
+            </span>
+        }
         <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer" style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", letterSpacing:".1em", textDecoration:"none", transition:"color .2s" }}
           onMouseEnter={e=>e.target.style.color="#00FFB0"} onMouseLeave={e=>e.target.style.color="#64748b"}>
-          💧 GET USDC →
+          💧 USDC →
         </a>
       </div>
     </div>
@@ -993,7 +1087,7 @@ function OnboardingTour({ onFinish }) {
 /* ═══════════════════════════════════════════════════════════════
    MAIN DASHBOARD
 ═══════════════════════════════════════════════════════════════ */
-function Dashboard({ user, prices, changes }) {
+function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError }) {
   const { account, balance, onArc, loadingBal, disconnect, refreshBalance } = useW3();
   const { push } = useNotif();
   const { notifs } = useNotif();
@@ -1088,7 +1182,7 @@ function Dashboard({ user, prices, changes }) {
     { id:"settings",   icon:"⚙",  label:"Settings" },
   ];
 
-  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, prices, agentLogs, setPanel, changes };
+  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel };
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -1117,7 +1211,7 @@ function Dashboard({ user, prices, changes }) {
       {/* Main content */}
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
         {/* Price ticker */}
-        <PriceTicker prices={prices} changes={changes}/>
+        <PriceTicker prices={prices} changes={changes} change24h={change24h} lastUpdate={lastUpdate} priceError={priceError}/>
 
         {/* Top bar */}
         <div style={{ height:40, flexShrink:0, background:"rgba(0,5,3,.96)", borderBottom:"1px solid rgba(0,255,176,.08)", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 14px", position:"relative" }}>
@@ -1200,7 +1294,7 @@ function NotOnArcWarning() {
   );
 }
 
-function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, setPanel, prices, changes, refreshBalance }) {
+function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, setPanel, prices, changes, change24h, lastUpdate, priceError, refreshBalance }) {
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <div style={{ fontSize:9, color:"#4a7c5f", letterSpacing:".2em", fontFamily:"monospace", marginBottom:14 }}>◈ SYSTEM OVERVIEW — ARC TESTNET</div>
@@ -1248,6 +1342,37 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, set
               <span style={{ fontSize:8, color:"#4ade80", fontFamily:"monospace", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{v}</span>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Live prices — real CoinGecko */}
+      <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"10px 13px", marginBottom:14 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".18em", fontFamily:"monospace" }}>LIVE PRICES</div>
+          <div style={{ fontSize:7, color:priceError?"#f87171":"#4a7c5f", fontFamily:"monospace" }}>
+            {priceError ? "⚠ API unavailable · last known" : `CoinGecko · ${lastUpdate || "loading..."}`}
+          </div>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6 }}>
+          {["USDC","WETH","WBTC"].map(t => {
+            const p = prices[t] || 0;
+            const d24 = change24h?.[t] ?? 0;
+            const up  = d24 >= 0;
+            return (
+              <div key={t} style={{ background:"rgba(0,0,0,.3)", borderRadius:4, padding:"8px 10px" }}>
+                <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:2 }}>{t}</div>
+                <div style={{ fontSize:14, color:"#ffffff", fontFamily:"monospace", fontWeight:700, lineHeight:1 }}>
+                  ${p < 10 ? p.toFixed(4) : p < 1000 ? p.toFixed(2) : p.toLocaleString("en-US",{maximumFractionDigits:0})}
+                </div>
+                {t !== "USDC"
+                  ? <div style={{ fontSize:8, color:up?"#00FFB0":"#f87171", fontFamily:"monospace", marginTop:3 }}>
+                      {up?"▲":"▼"} {Math.abs(d24).toFixed(2)}% 24h
+                    </div>
+                  : <div style={{ fontSize:8, color:"#4a7c5f", fontFamily:"monospace", marginTop:3 }}>stable · pegged</div>
+                }
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -1940,7 +2065,7 @@ function AppCore() {
   const [booted,    setBooted]    = useState(false);
   const [user,      setUser]      = useState(null);
   const [showTour,  setShowTour]  = useState(false);
-  const { prices, changes }       = usePriceFeed();
+  const { prices, changes, change24h, lastUpdate, priceError } = usePriceFeed();
   const { account }               = useW3();
 
   // Auto-logout when wallet disconnects
@@ -1976,7 +2101,7 @@ function AppCore() {
       <div style={{ height:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:user?"0":"24px 16px", position:"relative", zIndex:1, opacity:booted?1:0, transition:"opacity .6s ease .2s", overflow:"hidden" }}>
         {!user
           ? <AuthScreen onAuth={handleAuth} />
-          : <Dashboard user={user} prices={prices} changes={changes} />
+          : <Dashboard user={user} prices={prices} changes={changes} change24h={change24h} lastUpdate={lastUpdate} priceError={priceError} />
         }
       </div>
     </>
