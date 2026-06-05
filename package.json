@@ -1,14 +1,14 @@
 {
-  "name": "privarc-v9",
-  "version": "3.0.0",
+  "name": "privarc-os",
+  "version": "10.0.0",
   "private": true,
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev":     "vite",
+    "build":   "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^18.2.0",
+    "react":     "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
