@@ -1799,11 +1799,11 @@ function AnalyticsPanel({ protocolStats, onArc }) {
           ))}
         </div>
         <div style={{ fontSize:8, color:"#4a7c5f", fontFamily:"monospace", marginBottom:10 }}>
-          ↗ <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.ShieldVault}\`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0", textDecoration:"none" }}>ShieldVault on ARCScan</a>
+          ↗ <a href={`https://testnet.arcscan.app/address/${CONTRACTS.ShieldVault}`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0", textDecoration:"none" }}>ShieldVault on ARCScan</a>
           &nbsp;·&nbsp;
-          <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.MerkleTreeManager}\`} target="_blank" rel="noreferrer" style={{ color:"#a78bfa", textDecoration:"none" }}>MerkleTree</a>
+          <a href={`https://testnet.arcscan.app/address/${CONTRACTS.MerkleTreeManager}`} target="_blank" rel="noreferrer" style={{ color:"#a78bfa", textDecoration:"none" }}>MerkleTree</a>
           &nbsp;·&nbsp;
-          <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.EmergencyController}\`} target="_blank" rel="noreferrer" style={{ color:"#fbbf24", textDecoration:"none" }}>EmergencyController</a>
+          <a href={`https://testnet.arcscan.app/address/${CONTRACTS.EmergencyController}`} target="_blank" rel="noreferrer" style={{ color:"#fbbf24", textDecoration:"none" }}>EmergencyController</a>
         </div>
         {[["Network","Arc Testnet — Circle L1"],["Chain ID","5042002"],["Gas Token","USDC (ERC-20 interface, 6 dec)"],["Finality","< 1 second (deterministic)"],["Explorer","testnet.arcscan.app"],["Faucet","faucet.circle.com (1 USDC/day)"]].map(([k,v])=>(
           <div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
