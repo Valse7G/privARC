@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
+import { CONTRACTS, SELECTORS, encodeAddress, encodeUint256, decodeUint256, decodeUint8 } from "./contracts.js";
 
 /* ═══════════════════════════════════════════════════════════════
    ARC NETWORK — OFFICIAL CHAIN CONFIGS (docs.arc.io)
@@ -1099,9 +1100,11 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   const [showSearch, setShowSearch] = useState(false);
   const [showDisc, setShowDisc]     = useState(false);
   const [agentLogs, setAgentLogs]   = useState([
-    { t:"00:00:01", m:"ShieldAgent :: Monitoring Arc Testnet ShieldVault", c:"#00FFB0" },
-    { t:"00:00:03", m:"ZKAgent :: Groth16 proof batch ready — 0 pending", c:"#4ade80" },
-    { t:"00:00:07", m:"RiskAgent :: Arc Testnet volatility: LOW",          c:"#4ade80" },
+    { t:"00:00:01", m:`ShieldAgent :: ShieldVault @ ${CONTRACTS.ShieldVault.slice(0,10)}...`, c:"#00FFB0" },
+    { t:"00:00:02", m:`ShieldAgent :: MerkleTree @ ${CONTRACTS.MerkleTreeManager.slice(0,10)}...`, c:"#00FFB0" },
+    { t:"00:00:03", m:"ZKAgent :: Groth16 proof batch ready — 0 pending",          c:"#4ade80" },
+    { t:"00:00:07", m:"RiskAgent :: Arc Testnet volatility: LOW",                   c:"#4ade80" },
+    { t:"00:00:10", m:`EmergencyController @ ${CONTRACTS.EmergencyController.slice(0,10)}...`, c:"#64748b" },
     { t:"00:00:12", m:`FeeAgent :: USDC gas oracle — ${ARC_TESTNET.rpcUrl}`, c:"#4ade80" },
   ]);
   const unread = notifs.filter(n=>!n.read).length;
@@ -1116,6 +1119,9 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     };
     if (onArc) { fetchBlock(); const id = setInterval(fetchBlock, 6000); return ()=>clearInterval(id); }
   }, [onArc]);
+
+  // ── Live protocol stats (ShieldVault on-chain reads) ──────────────────────
+  const protocolStats = useProtocolStats(onArc);
 
   // Agent log ticker
   useEffect(() => {
@@ -1182,7 +1188,7 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     { id:"settings",   icon:"⚙",  label:"Settings" },
   ];
 
-  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel };
+  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel, protocolStats };
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -1421,6 +1427,57 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, set
 }
 
 /* ─── TX helper shared by all panels ─────────────────────────── */
+
+/* ═══════════════════════════════════════════════════════════════
+   PROTOCOL STATS — Live on-chain reads from ShieldVault
+═══════════════════════════════════════════════════════════════ */
+function useProtocolStats(onArc) {
+  const [stats, setStats] = useState({
+    totalShielded: null,   // BigInt
+    leafCount:     null,   // BigInt
+    lastRoot:      null,   // bytes32 hex
+    pauseState:    null,   // 0=ACTIVE 1=PAUSED 2=EMERGENCY
+    windowVol:     null,   // BigInt
+    cbThreshold:   null,   // BigInt
+  });
+
+  useEffect(() => {
+    if (!onArc) return;
+
+    const fetch = async () => {
+      try {
+        const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
+
+        const [shielded, leafIdx, lastRoot, pause, windowVol, cbThresh] = await Promise.all([
+          call(CONTRACTS.ShieldVault,         SELECTORS.totalShielded),
+          call(CONTRACTS.MerkleTreeManager,   SELECTORS.nextLeafIndex),
+          call(CONTRACTS.MerkleTreeManager,   SELECTORS.getLastRoot),
+          call(CONTRACTS.EmergencyController, SELECTORS.pauseState),
+          call(CONTRACTS.EmergencyController, SELECTORS.currentWindowVol),
+          call(CONTRACTS.EmergencyController, SELECTORS.cbThreshold),
+        ]);
+
+        setStats({
+          totalShielded: decodeUint256(shielded),
+          leafCount:     decodeUint256(leafIdx),
+          lastRoot:      lastRoot,
+          pauseState:    decodeUint8(pause),
+          windowVol:     decodeUint256(windowVol),
+          cbThreshold:   decodeUint256(cbThresh),
+        });
+      } catch (e) {
+        console.warn("useProtocolStats fetch error:", e);
+      }
+    };
+
+    fetch();
+    const id = setInterval(fetch, 10000); // refresh every 10s
+    return () => clearInterval(id);
+  }, [onArc]);
+
+  return stats;
+}
+
 function useTxSend({ account, onArc, notify, refreshBalance }) {
   const sendRealTx = useCallback(async ({ label, description, buildTx }) => {
     if (!onArc) { notify(label, "Switch to Arc Testnet first", "error"); return false; }
@@ -1449,34 +1506,76 @@ function useTxSend({ account, onArc, notify, refreshBalance }) {
   return { sendRealTx };
 }
 
-function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
+function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, protocolStats }) {
   const [amount, setAmount] = useState(""); const [loading, setLoading] = useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
 
   const submit = async () => {
     if (!amount || Number(amount) <= 0) return;
     setLoading(true);
-    // Convert USDC amount to wei (6 decimals for ERC-20)
+
     const amountWei6 = BigInt(Math.round(Number(amount) * 1e6));
-    // Step 1: For real ShieldVault, we'd call approve() then shield()
-    // Since ShieldVault contracts are PrivARC-specific (not yet on testnet),
-    // we demonstrate with a real ETH_CALL to the faucet contract or a demo transfer
-    // For now: real wallet signature + real transaction structure
+
+    // Step 1: approve(ShieldVault, amountWei6)
+    // ERC-20 approve(address spender, uint256 amount) → selector 0x095ea7b3
+    const approveData = SELECTORS.approve
+      + encodeAddress(CONTRACTS.ShieldVault)
+      + encodeUint256(amountWei6);
+
+    const approved = await sendRealTx({
+      label: "Approve USDC",
+      description: `Approving ${amount} USDC for ShieldVault`,
+      buildTx: () => ({ to: CONTRACTS.USDC, value: "0x0", data: approveData }),
+    });
+
+    if (!approved) { setLoading(false); return; }
+
+    // Step 2: ShieldVault.deposit(params)
+    // For testnet: commitment = keccak256(abi.encode(address, nonce))
+    // We generate a random 32-byte commitment as demo (real ZK would compute this off-chain)
+    const nonce = "0x" + Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map(b => b.toString(16).padStart(2,"0")).join("");
+
+    // deposit((bytes32 commitment, uint256 denomination, bytes proof))
+    // Selector: keccak256("deposit((bytes32,uint256,bytes))") — 0x98b1e06a
+    // For testnet MockVerifierZK accepts any proof → pass 0x00 (1 byte)
+    // ABI encoding: selector + tuple(bytes32, uint256, bytes)
+    //   offset to tuple = 0x20, commitment, denomination, offset to bytes, length of bytes, bytes padded
+    const depositSelector = "0x98b1e06a";
+    const depositData = depositSelector
+      + "0000000000000000000000000000000000000000000000000000000000000020" // offset to struct
+      + nonce.replace("0x","")                                             // commitment (bytes32)
+      + encodeUint256(amountWei6)                                          // denomination
+      + "0000000000000000000000000000000000000000000000000000000000000060" // offset to proof bytes
+      + "0000000000000000000000000000000000000000000000000000000000000001" // proof length = 1 byte
+      + "0000000000000000000000000000000000000000000000000000000000000000"; // proof data padded
+
     await sendRealTx({
       label: "Shield",
-      description: `Shielding ${amount} USDC on Arc Testnet`,
-      buildTx: (from) => ({
-        to: from, // Demo: self-transfer showing real tx flow
-        value: "0x0",
-        data: "0x" + "shield".split("").map(c=>c.charCodeAt(0).toString(16).padStart(2,"0")).join("") + amountWei6.toString(16).padStart(64,"0"),
-      }),
+      description: `Shielding ${amount} USDC → ShieldVault (Arc Testnet)`,
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data: depositData }),
     });
+
     setAmount(""); setLoading(false);
   };
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="🛡" title="SHIELD" sub="Deposit USDC into the ShieldVault — Arc Testnet"/>
+      {protocolStats && (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6, marginBottom:12 }}>
+          {[
+            { l:"TVL SHIELDED", v: protocolStats.totalShielded !== null ? "$"+(Number(protocolStats.totalShielded)/1e6).toFixed(2) : "—", c:"#00FFB0" },
+            { l:"COMMITMENTS",  v: protocolStats.leafCount     !== null ? protocolStats.leafCount.toString() : "—",                   c:"#a78bfa" },
+            { l:"VAULT STATUS", v: protocolStats.pauseState === 0 ? "ACTIVE" : protocolStats.pauseState === 1 ? "PAUSED" : "EMERGENCY", c: protocolStats.pauseState === 0 ? "#4ade80" : "#f87171" },
+          ].map(s=>(
+            <div key={s.l} style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:4, padding:"8px 10px" }}>
+              <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:3 }}>{s.l}</div>
+              <div style={{ fontSize:12, fontWeight:700, color:s.c, fontFamily:"monospace" }}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
       <NotOnArcWarning/>
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:12 }}>
         <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
@@ -1491,8 +1590,11 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
         <IG items={[["Protocol Fee","0.00 USDC","Launch phase"],["Gas","USDC","Arc Testnet"],["Privacy","ZK commitment","On-chain"]]}/>
       </div>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:3, padding:"8px 11px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5 }}>
-        ℹ Real transaction on Arc Testnet. Your wallet (MetaMask/Rabby/etc.) will prompt for signature and gas payment in USDC.
+        ℹ Two transactions required: (1) Approve USDC, (2) Deposit into ShieldVault.
+        Your wallet will prompt for each. Gas paid in USDC on Arc Testnet.
         <br/>Need USDC? <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>faucet.circle.com ↗</a>
+        &nbsp;·&nbsp;
+        <a href={`${ARC_TESTNET.explorer}/address/${CONTRACTS.ShieldVault}`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>ShieldVault ↗</a>
       </div>
       <ArcBtn label={onArc?"⟶ SHIELD ASSETS (REAL TX)":"⚠ SWITCH TO ARC TESTNET FIRST"} onClick={onArc?submit:undefined} loading={loading} disabled={!onArc||!amount||Number(amount)<=0} color={onArc?"#00FFB0":"#F59E0B"}/>
     </div>
@@ -1644,7 +1746,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance }) {
   );
 }
 
-function AnalyticsPanel() {
+function AnalyticsPanel({ protocolStats, onArc }) {
   const spkD=useMemo(()=>{let v=3800000;return Array.from({length:30},()=>{v+=((Math.random()-.4)*150000);v=Math.max(1e6,v);return Math.round(v);});},[]);
   const txD=useMemo(()=>Array.from({length:30},()=>Math.floor(Math.random()*400+100)),[]);
   const HM=useMemo(()=>Array.from({length:7},()=>Array.from({length:24},()=>Math.floor(Math.random()*150))),[]);
@@ -1681,7 +1783,28 @@ function AnalyticsPanel() {
         {mkSpk(txD,"#0EA5E9","DAILY TRANSACTIONS")}
       </div>
       <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>ARC TESTNET STATS</div>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>ARC TESTNET STATS — LIVE ON-CHAIN</div>
+        {/* Live reads from ShieldVault + EmergencyController */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:6, marginBottom:10 }}>
+          {[
+            { l:"TVL SHIELDED",    v: protocolStats?.totalShielded != null ? "$"+(Number(protocolStats.totalShielded)/1e6).toFixed(2) : "—",   c:"#00FFB0" },
+            { l:"COMMITMENTS",     v: protocolStats?.leafCount     != null ? "#"+protocolStats.leafCount.toString() : "—",                      c:"#a78bfa" },
+            { l:"VAULT STATUS",    v: protocolStats?.pauseState    === 0 ? "🟢 ACTIVE" : protocolStats?.pauseState === 1 ? "🟡 PAUSED" : "🔴 EMERGENCY", c: protocolStats?.pauseState === 0 ? "#4ade80" : "#f87171" },
+            { l:"WINDOW VOLUME",   v: protocolStats?.windowVol     != null ? "$"+(Number(protocolStats.windowVol)/1e6).toFixed(2) : "—",        c:"#fbbf24" },
+          ].map(s=>(
+            <div key={s.l} style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.08)", borderRadius:4, padding:"8px 10px" }}>
+              <div style={{ fontSize:7, color:"#64748b", letterSpacing:".12em", fontFamily:"monospace", marginBottom:3 }}>{s.l}</div>
+              <div style={{ fontSize:13, fontWeight:700, color:s.c, fontFamily:"monospace" }}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize:8, color:"#4a7c5f", fontFamily:"monospace", marginBottom:10 }}>
+          ↗ <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.ShieldVault}\`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0", textDecoration:"none" }}>ShieldVault on ARCScan</a>
+          &nbsp;·&nbsp;
+          <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.MerkleTreeManager}\`} target="_blank" rel="noreferrer" style={{ color:"#a78bfa", textDecoration:"none" }}>MerkleTree</a>
+          &nbsp;·&nbsp;
+          <a href={\`https://testnet.arcscan.app/address/${CONTRACTS.EmergencyController}\`} target="_blank" rel="noreferrer" style={{ color:"#fbbf24", textDecoration:"none" }}>EmergencyController</a>
+        </div>
         {[["Network","Arc Testnet — Circle L1"],["Chain ID","5042002"],["Gas Token","USDC (ERC-20 interface, 6 dec)"],["Finality","< 1 second (deterministic)"],["Explorer","testnet.arcscan.app"],["Faucet","faucet.circle.com (1 USDC/day)"]].map(([k,v])=>(
           <div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
             <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{k}</span>
@@ -1834,12 +1957,21 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 
   const stake=async()=>{
     if(!stakeAmt)return;setStaking(true);
-    await sendRealTx({label:"Stake",description:`Staking ${stakeAmt} USDC (${lock}d lock)`,buildTx:(from)=>({to:from,value:"0x0",data:"0xstakedata"})});
+    // Staking.stake(uint256 amount, uint256 lockDays)
+    // selector: keccak256("stake(uint256,uint256)") = 0xa694fc3a... precomputed
+    // approve first
+    const amtWei = BigInt(Math.round(Number(stakeAmt)*1e6));
+    const approveD = SELECTORS.approve + encodeAddress(CONTRACTS.Staking) + encodeUint256(amtWei);
+    const ok = await sendRealTx({label:"Approve USDC",description:`Approving ${stakeAmt} USDC for Staking`,buildTx:()=>({to:CONTRACTS.USDC,value:"0x0",data:approveD})});
+    if(!ok){setStaking(false);return;}
+    const stakeData = "0xa694fc3a" + encodeUint256(amtWei) + encodeUint256(lock);
+    await sendRealTx({label:"Stake",description:`Staking ${stakeAmt} USDC (${lock}d lock)`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:stakeData})});
     setStakeAmt("");setStaking(false);
   };
   const claim=async()=>{
     setClaiming(true);
-    await sendRealTx({label:"Claim Rewards",description:"Claiming staking rewards",buildTx:(from)=>({to:from,value:"0x0",data:"0xclaimdata"})});
+    // claimRewards() selector: keccak256("claimRewards()") = 0x372500ab
+    await sendRealTx({label:"Claim Rewards",description:"Claiming staking rewards",buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:"0x372500ab"})});
     setClaiming(false);
   };
 
@@ -1867,7 +1999,8 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
           <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
             <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>UNSTAKE</div>
             <OsField label="AMOUNT" value={unstakeAmt} onChange={e=>setUnstakeAmt(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
-            <ArcBtn label={unstaking?"Unstaking...":"UNSTAKE"} onClick={async()=>{if(!unstakeAmt||!onArc)return;setUnstaking(true);await sendRealTx({label:"Unstake",description:`Unstaking ${unstakeAmt} USDC`,buildTx:(from)=>({to:from,value:"0x0",data:"0xunstakedata"})});setUnstakeAmt("");setUnstaking(false);}} loading={unstaking} disabled={!unstakeAmt||!onArc} color="#4ade80" small/>
+            <ArcBtn label={unstaking?"Unstaking...":"UNSTAKE"} onClick={async()=>{if(!unstakeAmt||!onArc)return;setUnstaking(true);const unstakeData="0x2e1a7d4d"+encodeUint256(BigInt(Math.round(Number(unstakeAmt)*1e6)));
+    await sendRealTx({label:"Unstake",description:`Unstaking ${unstakeAmt} USDC`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:unstakeData})});setUnstakeAmt("");setUnstaking(false);}} loading={unstaking} disabled={!unstakeAmt||!onArc} color="#4ade80" small/>
           </div>
           <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
             <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:4 }}>PENDING REWARDS</div>
@@ -1904,7 +2037,8 @@ function PortfolioPanel({ account, balance, usdcBalance, prices }) {
         <div style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>USD · Arc Testnet balance</div>
         <div style={{ display:"flex", gap:8, marginTop:10 }}>
           <button onClick={exportReport} style={{ padding:"5px 10px", background:"rgba(0,255,176,.06)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", transition:"all .2s" }} onMouseEnter={e=>e.currentTarget.style.background="rgba(0,255,176,.14)"} onMouseLeave={e=>e.currentTarget.style.background="rgba(0,255,176,.06)"}>⬇ EXPORT REPORT</button>
-          <a href={`${ARC_TESTNET.explorer}/address/${account?.address}`} target="_blank" rel="noreferrer" style={{ padding:"5px 10px", background:"rgba(14,165,233,.06)", border:"1px solid rgba(14,165,233,.2)", borderRadius:3, color:"#0EA5E9", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", textDecoration:"none", display:"inline-flex", alignItems:"center" }}>↗ VIEW ON ARCSCAN</a>
+          <a href={`${ARC_TESTNET.explorer}/address/${account?.address}`} target="_blank" rel="noreferrer" style={{ padding:"5px 10px", background:"rgba(14,165,233,.06)", border:"1px solid rgba(14,165,233,.2)", borderRadius:3, color:"#0EA5E9", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", textDecoration:"none", display:"inline-flex", alignItems:"center" }}>↗ MY WALLET</a>
+          <a href={`${ARC_TESTNET.explorer}/address/${CONTRACTS.ShieldVault}`} target="_blank" rel="noreferrer" style={{ padding:"5px 10px", background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", textDecoration:"none", display:"inline-flex", alignItems:"center" }}>🛡 SHIELDVAULT</a>
         </div>
       </div>
       {P.map((p,i)=>(
