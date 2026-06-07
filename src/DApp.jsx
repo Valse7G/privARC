@@ -1517,13 +1517,16 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     if (!approved) { setLoading(false); return; }
 
     // Step 2: ShieldVault.deposit(DepositParams)
+    // buildDepositCalldata returns { data, value }:
+    //   - Native USDC: value = amount * 1e12 (wei), deposit() is payable
+    //   - ERC-20 (EURC/cirBTC): value = "0x0", standard transferFrom flow
     const commitment = "0x" + Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
-    const depositData = buildDepositCalldata(commitment, token.address, amountBig);
+    const { data: depositData, value: depositValue } = buildDepositCalldata(commitment, token.address, amountBig);
 
     await sendRealTx({
       label: `Shield ${token.symbol}`,
       description: `Shielding ${amount} ${token.symbol} → ShieldVault v2`,
-      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data: depositData }),
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: depositValue, data: depositData }),
     });
     setAmount(""); setLoading(false);
   };
