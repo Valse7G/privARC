@@ -1501,7 +1501,8 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     if (!amount || isNaN(parsed) || parsed <= 0) return;
     setLoading(true);
 
-    const amountBig = BigInt(Math.round(parsed * Math.pow(10, token.decimals)));
+    // BigInt cast — avoids float precision loss on sub-unit amounts
+    const amountBig = BigInt(Math.round(parsed * 10 ** token.decimals));
     if (amountBig < token.minDeposit) {
       notify(`Min deposit: ${token.minDisplay}`, "error");
       setLoading(false); return;
