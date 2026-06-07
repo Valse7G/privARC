@@ -1,104 +1,176 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  PrivARC — Contract Config
-//  Deployed: 2026-06-06 | Arc Testnet (chainId: 5042002)
-//  Source:   deployments/latest.json
+//  PrivARC OS — Contract Config v2.0.0
+//  Deployed : 2026-06-07T16:03:16Z | Arc Testnet (chainId: 5042002)
+//  Version  : 2.0.0 — multi-token (USDC, EURC, cirBTC), free-amount deposits
 // ════════════════════════════════════════════════════════════════════════════
 
+export const ARC_CHAIN_ID = 5042002;
+
+// ── Deployed contract addresses ───────────────────────────────────────────────
 export const CONTRACTS = {
+  // Tokens
   USDC:                "0x3600000000000000000000000000000000000000",
+  EURC:                "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+  cirBTC:              "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",
   CCTP_TokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
-  Timelock:            "0xcA026AFb4988f42A8b4569Ec16b49bcb73855a0e",
-  Governance:          "0x8E98c0Dfa9fdC3D00B8aA7800594Eea0260939b0",
-  Staking:             "0xBca9C8cDAbEC170f04Fd5420ef773c28B8F6ff68",
-  VerifierZK:          "0x1b2633212B84368C2d489a2708D61596BBFE0070",
-  NullifierRegistry:   "0x850371D9850b04284877b37070DaBcbc289E10E8",
-  MerkleTreeManager:   "0x94c80e477ed252574C5651f329b503aB7d9bebCe",
-  DepositManager:      "0x02627f3fEc7433Dbab18f1C1Dd263C3756b65e16",
-  WithdrawalManager:   "0x6CFCfb7024AE055316579411d57763158e47F1D0",
-  ShieldedTransfer:    "0xB655050ce92b633f8e28110BD6cafE06B9Cd5714",
-  PrivateSwap:         "0x68382E6489C8A64E2591cE177AE854dAbB4D93B1",
-  PrivateBridge:       "0x13fe3703540Bf3B5f109Bf7493f738D2F4863875",
-  EmergencyController: "0xf46f4457A1eA2B2Eb689C7d478722992C656f218",
-  ShieldVault:         "0xB8E4FA0d7597C6458FD2D81Fc091FDDb067FBE8e",
+  // Governance
+  Timelock:            "0x156eA35D3352FfbEF2F295406884C215A83228f8",
+  Governance:          "0x0e374e28B5eD7f6169F4Bb16E4062Da68F59F5Bd",
+  Staking:             "0x7738A1Bb06A0Ce548781ec20Ed15996F2017836D",
+  // ZK Infrastructure
+  MockVerifierZK:      "0xE3dC06e296364e7957697A47CC49Df24515B28E1",
+  NullifierRegistry:   "0x951e656a9f482616a3423b293bB53aB512528426",
+  MerkleTreeManager:   "0xD096a30e29Ea51f0Dd6feD4f35A27b3ADe8360Cb",
+  // Operation Modules
+  DepositManager:      "0x738a8665EbF79924B5A9bcEa2E97Ad8A3C14211e",
+  WithdrawalManager:   "0xBAf9c787600964E508B58a4103C912EdD4f72C75",
+  ShieldedTransfer:    "0xE36Cd98d6912F37d4A503d0E2ca4897B0dC96A12",
+  PrivateSwap:         "0xFf06325E6fAA3b43C9e01A3Ed580E5AcafF45604",
+  PrivateBridge:       "0x91af1c5621fc77c71DBD2d1bFD209ce773c4b890",
+  EmergencyController: "0x8C177328092Ffc4937Ae4334869c6B1F767a9Ae3",
+  ShieldVault:         "0x7dCECab394A4483337c64A26239A0C79b99Be079",
 };
 
-// ── Minimal ABIs (function selectors only — no full ABI needed for eth_call) ──
+// ── Supported tokens config ───────────────────────────────────────────────────
+export const TOKENS = {
+  USDC: {
+    address:    CONTRACTS.USDC,
+    symbol:     "USDC",
+    name:       "USD Coin",
+    decimals:   6,
+    minDeposit: 1_000_000n,        // 1 USDC
+    minDisplay: "1 USDC",
+    color:      "#2775CA",
+    logo:       "💵",
+  },
+  EURC: {
+    address:    CONTRACTS.EURC,
+    symbol:     "EURC",
+    name:       "Euro Coin",
+    decimals:   6,
+    minDeposit: 1_000_000n,        // 1 EURC
+    minDisplay: "1 EURC",
+    color:      "#003087",
+    logo:       "💶",
+  },
+  cirBTC: {
+    address:    CONTRACTS.cirBTC,
+    symbol:     "cirBTC",
+    name:       "Canonical BTC",
+    decimals:   8,
+    minDeposit: 10_000n,           // 0.0001 cirBTC
+    minDisplay: "0.0001 cirBTC",
+    color:      "#F7931A",
+    logo:       "₿",
+  },
+};
 
-// ERC-20 USDC
-export const USDC_ABI = [
-  "function balanceOf(address owner) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-];
+export const TOKEN_LIST = Object.values(TOKENS);
 
-// ShieldVault
-export const SHIELD_VAULT_ABI = [
-  "function totalShielded() view returns (uint256)",
-  "function protocolFee() view returns (uint256)",
-  "function merkleTree() view returns (address)",
-  "function deposit((bytes32 commitment, uint256 denomination, bytes proof) params) returns (uint256 leafIndex, bytes32 merkleRoot)",
-  "function withdraw((bytes32 nullifier, bytes32 root, address recipient, address relayer, uint256 relayerFee, uint256 amount, bytes proof) params) returns (bool)",
-];
-
-// MerkleTreeManager
-export const MERKLE_ABI = [
-  "function nextLeafIndex() view returns (uint256)",
-  "function getLastRoot() view returns (bytes32)",
-];
-
-// EmergencyController
-export const EMERGENCY_ABI = [
-  "function pauseState() view returns (uint8)",   // 0=ACTIVE 1=PAUSED 2=EMERGENCY
-  "function currentWindowVolume() view returns (uint256)",
-  "function CIRCUIT_BREAKER_THRESHOLD() view returns (uint256)",
-];
-
-// Staking
-export const STAKING_ABI = [
-  "function stake(uint256 amount, uint256 lockDays) returns (bool)",
-  "function unstake(uint256 amount) returns (bool)",
-  "function stakedBalance(address user) view returns (uint256)",
-  "function pendingRewards(address user) view returns (uint256)",
-  "function claimRewards() returns (uint256)",
-];
-
-// ── ABI encoding helpers (no ethers.js dependency — raw hex encoding) ────────
-
-// keccak256 of function signature → first 4 bytes (selector)
-// Pre-computed selectors for the functions we call:
-export const SELECTORS = {
+// ── Verified keccak256 selectors ──────────────────────────────────────────────
+export const SEL = {
   // ERC-20
-  balanceOf:         "0x70a08231", // balanceOf(address)
-  approve:           "0x095ea7b3", // approve(address,uint256)
-  allowance:         "0xdd62ed3e", // allowance(address,address)
-  // ShieldVault
-  totalShielded:     "0x3ffc1591", // totalShielded()
-  protocolFee:       "0x1d1b3464", // protocolFee()
+  balanceOf:          "0x70a08231",  // balanceOf(address)
+  approve:            "0x095ea7b3",  // approve(address,uint256)
+  allowance:          "0xdd62ed3e",  // allowance(address,address)
+  // ShieldVault v2
+  totalShielded:      "0x6d7f2685",  // totalShielded(address)
   // MerkleTreeManager
-  nextLeafIndex:     "0x5b62e9a2", // nextLeafIndex()
-  getLastRoot:       "0x47ef5c1c", // getLastRoot()
+  nextLeafIndex:      "0x0be4f422",  // nextLeafIndex()
+  getLastRoot:        "0xba70f757",  // getLastRoot()
   // EmergencyController
-  pauseState:        "0x9a1d40a1", // pauseState()
-  currentWindowVol:  "0xd8c9b4e7", // currentWindowVolume()
-  cbThreshold:       "0x2e82a2e0", // CIRCUIT_BREAKER_THRESHOLD()
+  pauseState:         "0xd7118351",  // pauseState()
+  currentWindowVol:   "0xf09b96b6",  // currentWindowVolume()
+  cbThreshold:        "0x0ca55cd7",  // CIRCUIT_BREAKER_THRESHOLD()
+  depositsAllowed:    "0x8f76137f",  // depositsAllowed()
+  withdrawalsAllowed: "0x4843b358",  // withdrawalsAllowed()
+  adminReset:         "0x8c5b9b00",  // adminReset()
+  // DepositManager v2
+  isTokenSupported:   "0x75151b63",  // isTokenSupported(address)
+  getSupportedTokens: "0xd3c7c2c7",  // getSupportedTokens()
+  minDeposit:         "0x3c29f839",  // minDeposit(address)
   // Staking
-  stakedBalance:     "0x49f4a614", // stakedBalance(address)
-  pendingRewards:    "0x8d54c2b1", // pendingRewards(address)
+  stake:              "0x7b0472f0",  // stake(uint256,uint256)
+  unstake:            "0x2e17de78",  // unstake(uint256)
+  claimRewards:       "0x372500ab",  // claimRewards()
+  previewRewards:     "0xf166e920",  // previewRewards(address)
 };
 
-// Encode address as 32-byte padded hex (for eth_call data)
+// ── ABI encoding helpers ──────────────────────────────────────────────────────
 export const encodeAddress = (addr) =>
   "000000000000000000000000" + addr.toLowerCase().replace("0x", "");
 
-// Encode uint256 as 32-byte padded hex
 export const encodeUint256 = (n) =>
   BigInt(n).toString(16).padStart(64, "0");
 
-// Decode uint256 from eth_call result
 export const decodeUint256 = (hex) =>
-  hex && hex !== "0x" ? BigInt(hex) : 0n;
+  hex && hex !== "0x" && hex.length > 2 ? BigInt(hex) : 0n;
 
-// Decode uint8 (enum) from eth_call result
 export const decodeUint8 = (hex) =>
-  hex && hex !== "0x" ? parseInt(hex, 16) : 0;
+  hex && hex !== "0x" && hex.length > 2 ? parseInt(hex.slice(-64), 16) : 0;
+
+export const formatToken = (amount, decimals, precision = 4) => {
+  if (amount === null || amount === undefined) return "—";
+  const n = Number(BigInt(amount)) / Math.pow(10, decimals);
+  return n.toLocaleString("en-US", { maximumFractionDigits: precision });
+};
+
+// ── Deposit calldata builder ──────────────────────────────────────────────────
+// ShieldVault.deposit(DepositParams) where DepositParams:
+//   bytes32 commitment, address token, uint256 amount,
+//   Proof proof{uint256[2],uint256[2][2],uint256[2]}, uint256[] publicInputs
+//
+// MockVerifierZK accepts any proof → use BN254 generator G1=(1,2), G2 standard
+export function buildDepositCalldata(commitment, tokenAddress, amount) {
+  const P1x = "0000000000000000000000000000000000000000000000000000000000000001";
+  const P1y = "0000000000000000000000000000000000000000000000000000000000000002";
+  const P2x0= "198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2";
+  const P2x1= "1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed";
+  const P2y0= "090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b";
+  const P2y1= "12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa";
+
+  const comm32  = commitment.replace("0x","").padStart(64,"0");
+  const token32 = encodeAddress(tokenAddress);
+  const amt32   = encodeUint256(amount);
+
+  // ABI encode struct with dynamic publicInputs array
+  // Slot offsets from start of tuple data:
+  // [0]  commitment    bytes32  (32 bytes)
+  // [1]  token         address  (32 bytes, padded)
+  // [2]  amount        uint256  (32 bytes)
+  // [3]  proof.a[0]   uint256
+  // [4]  proof.a[1]   uint256
+  // [5]  proof.b[0][0]
+  // [6]  proof.b[0][1]
+  // [7]  proof.b[1][0]
+  // [8]  proof.b[1][1]
+  // [9]  proof.c[0]
+  // [10] proof.c[1]
+  // [11] offset to publicInputs  = 11 * 32 = 352 = 0x160
+  // [12] publicInputs.length = 1
+  // [13] publicInputs[0] = commitment as uint256
+
+  const selector = "0xbd673975"; // deposit((bytes32,address,uint256,(uint256[2],uint256[2][2],uint256[2]),uint256[]))
+  const dynOffset = "0000000000000000000000000000000000000000000000000000000000000160"; // 352
+
+  return selector
+    + "0000000000000000000000000000000000000000000000000000000000000020" // offset to struct
+    + comm32   // commitment
+    + token32  // token (address, 32-byte padded)
+    + amt32    // amount
+    + P1x + P1y          // proof.a
+    + P2x0 + P2x1        // proof.b[0]
+    + P2y0 + P2y1        // proof.b[1]
+    + P1x + P1y          // proof.c
+    + dynOffset          // offset to publicInputs
+    + "0000000000000000000000000000000000000000000000000000000000000001" // length=1
+    + comm32;            // publicInputs[0] = commitment
+}
+
+export function buildApproveCalldata(spender, amount) {
+  return SEL.approve + encodeAddress(spender) + encodeUint256(amount);
+}
+
+export function buildStakeCalldata(amount, lockDays) {
+  return SEL.stake + encodeUint256(amount) + encodeUint256(lockDays);
+}
