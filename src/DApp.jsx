@@ -1653,7 +1653,8 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
     if(!/^0x[0-9a-fA-F]{40}$/.test(dest)){notify("Send Failed","Invalid address format","error");return;}
     setLoading(true);
     // Real USDC transfer: send native USDC (value field) to dest address
-    const amountHex = "0x" + BigInt(Math.round(Number(amount)*1e6)).toString(16);
+    // value is in wei (18 dec) — multiply ERC-20 amount (6 dec) by NATIVE_TO_ERC20_SHIFT (1e12)
+    const amountHex = "0x" + (BigInt(Math.round(Number(amount)*1e6)) * NATIVE_TO_ERC20_SHIFT).toString(16);
     await sendRealTx({ label:"Private Send", description:`${amount} USDC → ${sh(dest)} on Arc Testnet`, buildTx:()=>({ to:dest, value:amountHex, data:"0x" }) });
     setTo("");setAmount("");setResolved(null);setLoading(false);
   };
@@ -1682,7 +1683,8 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) 
     const target = dest||account?.address;
     if(!/^0x[0-9a-fA-F]{40}$/.test(target)){notify("Withdraw","Invalid destination address","error");return;}
     setLoading(true);
-    const amountHex = "0x" + BigInt(Math.round(Number(amount)*1e6)).toString(16);
+    // value is in wei (18 dec) — multiply ERC-20 amount (6 dec) by NATIVE_TO_ERC20_SHIFT (1e12)
+    const amountHex = "0x" + (BigInt(Math.round(Number(amount)*1e6)) * NATIVE_TO_ERC20_SHIFT).toString(16);
     await sendRealTx({ label:"Withdraw", description:`${amount} USDC → ${sh(target)}`, buildTx:()=>({ to:target, value:amountHex, data:"0x" }) });
     setAmount("");setDest("");setLoading(false);
   };
