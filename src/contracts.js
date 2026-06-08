@@ -1,52 +1,40 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  PrivARC OS — Contract Config v2.2.0 (audited)
-//  Addresses auto-loaded from: ../privarc-contracts-v2/deployments/latest.json
+//  PrivARC OS — Contract Config v2.3.0
+//  Addresses sourced from VITE_ env vars (Vercel) or hardcoded fallbacks.
 //
-//  WORKFLOW:
-//    1. cd privarc-contracts-v2 && npm run deploy:testnet
-//       → writes deployments/latest.json with all contract addresses
-//    2. cd ../privarc-v10 && npm run dev
-//       → Vite resolves the JSON import at build time — no manual copy needed
+//  WORKFLOW (local monorepo):
+//    After deploying contracts, copy latest.json addresses into .env.local:
+//      VITE_SHIELD_VAULT=0x...
+//      VITE_TIMELOCK=0x...  etc.
 //
-//  For manual override (e.g. Vercel CI without access to contracts repo),
-//  set VITE_OVERRIDE_CONTRACTS=true and define each address as a VITE_ env var.
+//  WORKFLOW (Vercel CI):
+//    Set the VITE_ env vars in the Vercel dashboard → Settings → Environment Variables.
+//    No file access needed at build time.
 //
-//  Fallback addresses last synced: 2026-06-08 (latest.json v2.1.0 — Arc Testnet)
+//  Fallback addresses: latest.json v2.1.0 — Arc Testnet — 2026-06-08
+//  Deployer: 0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894
 // ════════════════════════════════════════════════════════════════════════════
 
 export const ARC_CHAIN_ID = 5042002;
 
-// ── Load addresses from latest.json or VITE_ env overrides ───────────────────
-let _deployment;
-
-try {
-  // Vite resolves this JSON import at build time (static analysis).
-  // Path is relative to this file: src/ → ../privarc-contracts-v2/deployments/
-  _deployment = (await import("../../privarc-contracts-v2/deployments/latest.json")).default;
-} catch {
-  // Fallback: last known testnet deployment (manual override)
-  // Update these when deploying to a new environment without the contracts monorepo.
-  console.warn("[contracts.js] Could not load latest.json — using fallback addresses");
-  _deployment = {
-    contracts: {
-      ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x0352A0cAAEA755e0D1D6c4040c084eA731b5D454",
-      Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x3a9BeAA75bd8b4f975C29AA78744834531E16799",
-      Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x70F71a1CB248Dd900f3d7D39C4a4a54BA5d986d0",
-      Staking:             import.meta.env.VITE_STAKING               ?? "0x6841c7A3938791DDFDB90f31acC7072F7B1c967A",
-      NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0x28AFBbd86841f6eb2A219F4f8Ff69c577F30ADE1",
-      MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x80333Bf880b28A98b5206216edc4a8Cde0958979",
-      DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xFabE444BC5231a7cdF61f4346321517aF82162F7",
-      WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0xb37Ade468163FE3dCBB39ba1343651d7499dB3a2",
-      ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0x3C821bd2d510170b11Dc049D5CE988B605Fc1658",
-      PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0x01A06c330d9baEA60C5fc9D9b0AA2510E90C77dA",
-      PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0xF5206339d4E6c9712Ec4570A762a04E2fCdA44B0",
-      EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0xc44B286E65bAa36597980e48E879d317f954B94E",
-      MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0x8569c0D493c837A7618164DC8DE5BaF68C36e736",
-    },
-  };
-}
-
-const _c = _deployment.contracts;
+// ── Contract addresses (VITE_ env var → hardcoded fallback) ──────────────────
+// All fallbacks are synced with latest.json v2.1.0.
+// To override for a new deployment, set the corresponding VITE_ env var.
+const _c = {
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x0352A0cAAEA755e0D1D6c4040c084eA731b5D454",
+  Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x3a9BeAA75bd8b4f975C29AA78744834531E16799",
+  Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x70F71a1CB248Dd900f3d7D39C4a4a54BA5d986d0",
+  Staking:             import.meta.env.VITE_STAKING               ?? "0x6841c7A3938791DDFDB90f31acC7072F7B1c967A",
+  NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0x28AFBbd86841f6eb2A219F4f8Ff69c577F30ADE1",
+  MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x80333Bf880b28A98b5206216edc4a8Cde0958979",
+  DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xFabE444BC5231a7cdF61f4346321517aF82162F7",
+  WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0xb37Ade468163FE3dCBB39ba1343651d7499dB3a2",
+  ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0x3C821bd2d510170b11Dc049D5CE988B605Fc1658",
+  PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0x01A06c330d9baEA60C5fc9D9b0AA2510E90C77dA",
+  PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0xF5206339d4E6c9712Ec4570A762a04E2fCdA44B0",
+  EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0xc44B286E65bAa36597980e48E879d317f954B94E",
+  MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0x8569c0D493c837A7618164DC8DE5BaF68C36e736",
+};
 
 // ── Deployed contract addresses ───────────────────────────────────────────────
 export const CONTRACTS = {
