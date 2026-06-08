@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
-import { CONTRACTS, TOKENS, TOKEN_LIST, SEL, encodeAddress, encodeUint256, decodeUint256, decodeUint8, formatToken, buildDepositCalldata, buildApproveCalldata, buildStakeCalldata } from "./contracts.js";
+import { CONTRACTS, TOKENS, TOKEN_LIST, SEL, encodeAddress, encodeUint256, decodeUint256, decodeUint8, formatToken, buildDepositCalldata, buildApproveCalldata, buildStakeCalldata, needsApproveBeforeDeposit } from "./contracts.js";
 
 /* ═══════════════════════════════════════════════════════════════
    ARC NETWORK — OFFICIAL CHAIN CONFIGS (docs.arc.io)
@@ -160,9 +160,18 @@ async function personalSign(address, message) {
   ]);
 }
 
-// Send ETH/USDC transaction
+// Send ETH/USDC transaction with gas estimation (FIX F-08)
 async function sendTransaction(from, to, valueHex, data = "0x") {
-  return rpcCall("eth_sendTransaction", [{ from, to, value: valueHex, data, chainId: toHex(ARC_TESTNET.id) }]);
+  let gasLimit;
+  try {
+    const estimated = await rpcCall("eth_estimateGas", [{ from, to, value: valueHex, data, chainId: toHex(ARC_TESTNET.id) }]);
+    // Add 30% buffer to avoid out-of-gas on borderline txs
+    gasLimit = "0x" + Math.ceil(parseInt(estimated, 16) * 1.3).toString(16);
+  } catch {
+    // Fallback: 500k gas — sufficient for ShieldVault operations
+    gasLimit = "0x7A120";
+  }
+  return rpcCall("eth_sendTransaction", [{ from, to, value: valueHex, data, gas: gasLimit, chainId: toHex(ARC_TESTNET.id) }]);
 }
 
 // Wait for tx receipt (polling)
@@ -1470,7 +1479,7 @@ function useTxSend({ account, onArc, notify, refreshBalance }) {
       const hash = await sendTransaction(account.address, tx.to, tx.value || "0x0", tx.data || "0x");
       notify(label, "Waiting for confirmation on Arc Testnet...", "pending", hash);
       const receipt = await waitForReceipt(hash);
-      if (receipt.status === "0x1" || receipt.status === 1) {
+      if (Number(receipt.status) === 1) {  // FIX F-11: handles both "0x1" (string) and 1 (int) from different RPC implementations
         notify(`${label} ✓`, "Transaction confirmed on Arc Testnet", "success", hash);
         await refreshBalance(account.address);
         return true;
@@ -1508,13 +1517,15 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       setLoading(false); return;
     }
 
-    // Step 1: approve(ShieldVault, amount)
-    const approved = await sendRealTx({
-      label: `Approve ${token.symbol}`,
-      description: `Approving ${amount} ${token.symbol} for ShieldVault`,
-      buildTx: () => ({ to: token.address, value: "0x0", data: buildApproveCalldata(CONTRACTS.ShieldVault, amountBig) }),
-    });
-    if (!approved) { setLoading(false); return; }
+    // Step 1: approve(ShieldVault, amount) — skip for native USDC (FIX F-06)
+    if (needsApproveBeforeDeposit(token.address)) {
+      const approved = await sendRealTx({
+        label: `Approve ${token.symbol}`,
+        description: `Approving ${amount} ${token.symbol} for ShieldVault`,
+        buildTx: () => ({ to: token.address, value: "0x0", data: buildApproveCalldata(CONTRACTS.ShieldVault, amountBig) }),
+      });
+      if (!approved) { setLoading(false); return; }
+    }
 
     // Step 2: ShieldVault.deposit(DepositParams)
     // buildDepositCalldata returns { data, value }:
@@ -1605,17 +1616,15 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
   const swap = async () => {
     if(!amount||!q||!onArc)return;
     setLoading(true);
-    // PrivateSwap.executeSwap — selector 0x49fa2a6e
-    // For testnet: ZK proof is dummy (MockVerifierZK accepts all)
-    const nullifier = "0x"+Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
-    const outputComm= "0x"+Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,"0")).join("");
-    const tokenInAddr  = fr==="USDC"?CONTRACTS.USDC:fr==="EURC"?CONTRACTS.EURC:CONTRACTS.cirBTC;
-    const tokenOutAddr = to==="USDC"?CONTRACTS.USDC:to==="EURC"?CONTRACTS.EURC:CONTRACTS.cirBTC;
-    const amtIn = BigInt(Math.round(Number(amount)*1e6));
-    // First approve tokenIn to ShieldVault
-    const appData = buildApproveCalldata(CONTRACTS.ShieldVault, amtIn);
-    const ok = await sendRealTx({ label:`Approve ${fr}`, description:`Approving ${amount} ${fr}`, buildTx:()=>({to:tokenInAddr,value:"0x0",data:appData}) });
-    if(ok) await sendRealTx({ label:"Private Swap", description:`${amount} ${fr} → ${q.out} ${to} (ZK-private)`, buildTx:()=>({to:CONTRACTS.ShieldVault,value:"0x0",data:"0x49fa2a6e"+nullifier.replace("0x","")}) });
+    // FIX F-05: Previous implementation used selector "0x49fa2a6e" (incorrect) with only
+    // a random nullifier — missing the full SwapParams ABI encoding (token, amount, router,
+    // minAmountOut, deadline, ZK proof). Every tx would revert.
+    // Real swap requires: ZK proof generation + ShieldVault.privateSwapExec(SwapParams)
+    notify(
+      "Private Swap",
+      "ZK proof generation not yet available in this UI. Use the PrivARC CLI: npx privarc swap",
+      "error"
+    );
     setAmount(""); setQ(null); setLoading(false);
   };
 
@@ -1683,14 +1692,33 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) 
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
 
   const withdraw = async () => {
-    if(!amount)return;
-    const target = dest||account?.address;
-    if(!/^0x[0-9a-fA-F]{40}$/.test(target)){notify("Withdraw","Invalid destination address","error");return;}
-    setLoading(true);
-    // value is in wei (18 dec) — multiply ERC-20 amount (6 dec) by NATIVE_TO_ERC20_SHIFT (1e12)
-    const amountHex = "0x" + (BigInt(Math.round(Number(amount)*1e6)) * NATIVE_TO_ERC20_SHIFT).toString(16);
-    await sendRealTx({ label:"Withdraw", description:`${amount} USDC → ${sh(target)}`, buildTx:()=>({ to:target, value:amountHex, data:"0x" }) });
-    setAmount("");setDest("");setLoading(false);
+    // FIX F-01: The previous implementation sent funds directly from the user's wallet
+    // to the destination, completely bypassing ShieldVault. That was NOT a real ZK withdraw —
+    // it just moved public funds and left the shielded note unredeemed.
+    //
+    // A real withdraw requires:
+    //   1. Client-side ZK proof generation (Circom WASM prover, not yet integrated)
+    //   2. Call ShieldVault.withdraw(WithdrawalParams) with the proof
+    //
+    // Until the WASM prover is integrated, we block the action and inform the user.
+    notify(
+      "Withdraw",
+      "ZK proof generation not yet available in this UI. Use the PrivARC CLI: npx privarc withdraw",
+      "error"
+    );
+    return;
+
+    // ── FUTURE IMPLEMENTATION (when WASM prover is available) ──────────────
+    // if(!amount)return;
+    // const target = dest||account?.address;
+    // if(!/^0x[0-9a-fA-F]{40}$/.test(target)){notify("Withdraw","Invalid destination address","error");return;}
+    // setLoading(true);
+    // const amountBig = BigInt(Math.round(Number(amount)*1e6));
+    // const { proof, publicInputs, nullifier, root } = await generateWithdrawProof(amountBig, target);
+    // const withdrawCalldata = buildWithdrawCalldata({ proof, publicInputs, nullifier, root, token: CONTRACTS.USDC, recipient: target, amount: amountBig });
+    // await sendRealTx({ label:"Withdraw", description:`${amount} USDC → ${sh(target)}`,
+    //   buildTx:()=>({ to:CONTRACTS.ShieldVault, value:"0x0", data: withdrawCalldata }) });
+    // setAmount("");setDest("");setLoading(false);
   };
 
   return (
@@ -1704,7 +1732,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) 
       <OsField label="AMOUNT" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION ADDRESS (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
       <IG items={[["Gas","USDC","Arc Testnet"],["Finality","< 1 sec","Deterministic"],["Balance",usdcBalance!==null?fmtUsdc(usdcBalance)+" USDC":"Loading...",""]]}/>
-      <ArcBtn label={onArc?"⟶ WITHDRAW (REAL TX)":"⚠ SWITCH TO ARC TESTNET"} onClick={onArc?withdraw:undefined} loading={loading} disabled={!onArc||!amount||Number(amount)<=0} color={onArc?"#00FFB0":"#F59E0B"}/>
+      <ArcBtn label="⚠ ZK PROOF REQUIRED — USE CLI" onClick={withdraw} loading={loading} disabled={!onArc} color="#F59E0B"/>
     </div>
   );
 }
@@ -1716,10 +1744,15 @@ function BridgePanel({ account, onArc, notify, refreshBalance }) {
   const ch=CH.find(c=>c.id===dest);
 
   const bridge=async()=>{
-    if(!amount||!onArc)return;
-    setLoading(true);
-    await sendRealTx({ label:`Bridge→${ch?.name}`, description:`${amount} USDC via CCTP v2`, buildTx:(from)=>({to:from,value:"0x0",data:"0xbridgedata"}) });
-    setAmount("");setLoading(false);
+    // FIX F-02: Previous implementation used data:"0xbridgedata" — completely invalid calldata.
+    // Real bridge requires ZK proof + ShieldVault.privateBridgeExec(BridgeParams).
+    // Blocking until WASM prover integration is complete.
+    notify(
+      "Bridge",
+      "ZK proof generation not yet available in this UI. Use the PrivARC CLI: npx privarc bridge",
+      "error"
+    );
+    setLoading(false);
   };
 
   return (
@@ -1747,6 +1780,7 @@ function AnalyticsPanel() {
   const txD=useMemo(()=>Array.from({length:30},()=>Math.floor(Math.random()*400+100)),[]);
   const HM=useMemo(()=>Array.from({length:7},()=>Array.from({length:24},()=>Math.floor(Math.random()*150))),[]);
   const hmMax=Math.max(...HM.flat());
+  // FIX F-12: simulated data disclaimer injected at top of panel render (see return below)
 
   const mkSpk=(data,col,label,fmt=v=>v.toLocaleString())=>{
     const mx=Math.max(...data),mn=Math.min(...data);
@@ -1771,6 +1805,10 @@ function AnalyticsPanel() {
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="📈" title="ANALYTICS" sub="Arc Testnet protocol metrics"/>
+      {/* FIX F-12: Clearly label charts as simulated to avoid confusion with real protocol data */}
+      <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.25)", borderRadius:4, padding:"7px 12px", marginBottom:8, fontSize:9, color:"#F59E0B", fontFamily:"monospace", display:"flex", alignItems:"center", gap:6 }}>
+        ⚠ SIMULATED DATA — Charts are randomly generated for UI demonstration. Real on-chain metrics will populate after mainnet deployment.
+      </div>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>
         ℹ Data sourced from Arc Testnet (chainId: 5042002). Explore: <a href={ARC_TESTNET.explorer} target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>testnet.arcscan.app ↗</a>
       </div>
@@ -1899,7 +1937,11 @@ function GovPanel({ account, onArc, notify }) {
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
         <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.18)", borderRadius:5, padding:"12px 14px" }}><div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:5 }}>WALLET</div><div style={{ fontSize:13, color:"#00FFB0", fontFamily:"monospace", fontWeight:700 }}>{sh(account?.address)}</div><div style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>{account?.walletName} · Arc Testnet</div></div>
-        <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px 14px" }}><div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:7 }}>DELEGATE VOTES</div><OsField label="" value={delegate} onChange={e=>setDelegate(e.target.value)} placeholder="0x... or name.arc" icon="👤"/><ArcBtn label={delegating?"Delegating...":"DELEGATE"} onClick={async()=>{if(!delegate||!onArc)return;setDelegating(true);try{const h=await sendTransaction(account.address,account.address,"0x0","0xdelegate");notify("Delegated",`Votes delegated to ${sh(delegate)}`,"success",h);}catch(e){if(e.code!==4001)notify("Delegated",`Votes → ${sh(delegate)}`,"success","0x"+hx(64));}setDelegating(false);}} loading={delegating} disabled={!delegate||!onArc} small/></div>
+        <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px 14px" }}><div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:7 }}>DELEGATE VOTES</div><OsField label="" value={delegate} onChange={e=>setDelegate(e.target.value)} placeholder="0x... or name.arc" icon="👤"/><ArcBtn label={delegating?"Delegating...":"DELEGATE"} onClick={async()=>{if(!delegate||!onArc)return;setDelegating(true);try{
+  // FIX F-09: delegate(address) = 0x5c19a95c — "0xdelegate" was invalid calldata
+  const delegateCalldata="0x5c19a95c"+encodeAddress(delegate);
+  const h=await sendTransaction(account.address,CONTRACTS.USDC,"0x0",delegateCalldata);
+  notify("Delegated",`Votes delegated to ${sh(delegate)}`,"success",h);}catch(e){if(e.code!==4001)notify("Delegate Failed",e.message||"Transaction failed","error");}setDelegating(false);}} loading={delegating} disabled={!delegate||!onArc} small/></div>
       </div>
       {PROPS.map(p=>(
         <div key={p.id} style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.09)", borderRadius:5, padding:"12px 14px", marginBottom:8 }}>
@@ -1967,9 +2009,17 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
         <div style={{ display:"grid", gridTemplateRows:"1fr 1fr", gap:8 }}>
           <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
             <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>UNSTAKE</div>
-            <OsField label="AMOUNT" value={unstakeAmt} onChange={e=>setUnstakeAmt(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
-            <ArcBtn label={unstaking?"Unstaking...":"UNSTAKE"} onClick={async()=>{if(!unstakeAmt||!onArc)return;setUnstaking(true);const unstakeData=SEL.unstake+encodeUint256(BigInt(Math.round(Number(unstakeAmt)*1e6)));
-    await sendRealTx({label:"Unstake",description:`Unstaking ${unstakeAmt} USDC`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:unstakeData})});setUnstakeAmt("");setUnstaking(false);}} loading={unstaking} disabled={!unstakeAmt||!onArc} color="#4ade80" small/>
+            <OsField label="STAKE INDEX (0, 1, 2...)" value={unstakeAmt} onChange={e=>setUnstakeAmt(e.target.value)} placeholder="0" icon="↙" hint="Enter position index from getUserStakes()"/>
+            <ArcBtn label={unstaking?"Unstaking...":"UNSTAKE"} onClick={async()=>{
+    if(!unstakeAmt||!onArc)return;
+    setUnstaking(true);
+    // FIX F-04: unstake(uint256 stakeId) expects a stake INDEX (0, 1, 2...)
+    // Previous bug: was encoding unstakeAmt*1e6 as wei amount — always reverts (invalid index)
+    // User enters the stake index (0-based) to unstake
+    const stakeIndex = BigInt(Math.floor(Number(unstakeAmt)));
+    const unstakeData = SEL.unstake + encodeUint256(stakeIndex);
+    await sendRealTx({label:"Unstake",description:`Unstaking position #${stakeIndex}`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:unstakeData})});
+    setUnstakeAmt("");setUnstaking(false);}} loading={unstaking} disabled={!unstakeAmt||!onArc} color="#4ade80" small/>
           </div>
           <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
             <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:4 }}>PENDING REWARDS</div>

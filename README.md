@@ -1,185 +1,62 @@
-<div align="center">
+# PrivARC OS — Frontend v10.2.0
 
-# PrivARC OS
+React + Vite DApp for the PrivARC privacy protocol on Arc Testnet.
 
-<img src="public/favicon.svg" width="64" alt="PrivARC"/>
+## Setup
 
-**Autonomous Crypto Operating System — Arc Testnet**
+```bash
+# From monorepo root (recommended)
+├── privarc-contracts-v2/   ← deploy contracts first
+└── privarc-v10/            ← then start frontend
 
-[![Arc Testnet](https://img.shields.io/badge/Network-Arc%20Testnet-00FFB0?style=for-the-badge)](https://testnet.arcscan.app)
-[![React](https://img.shields.io/badge/React-18.2-61DAFB?style=for-the-badge&logo=react)](https://react.dev)
-[![Vite](https://img.shields.io/badge/Vite-5.1-646CFF?style=for-the-badge&logo=vite)](https://vitejs.dev)
-[![Vercel](https://img.shields.io/badge/Deploy-Vercel-000000?style=for-the-badge&logo=vercel)](https://vercel.com)
-[![EIP-191](https://img.shields.io/badge/Auth-EIP--191-blue?style=for-the-badge)](https://eips.ethereum.org/EIPS/eip-191)
-[![ZK Proofs](https://img.shields.io/badge/ZK-Groth16%20%2B%20PLONK-a78bfa?style=for-the-badge)](https://z.cash/technology/groth16/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
+# 1. Deploy contracts (generates deployments/latest.json)
+cd privarc-contracts-v2
+npm install && npm run deploy:testnet
 
-*One repo · One Vercel deployment · Landing page + full DApp*
+# 2. Start frontend (auto-loads addresses from latest.json)
+cd ../privarc-v10
+npm install && npm run dev
+```
 
-</div>
+## Standalone deploy (Vercel, without contracts monorepo)
 
----
+Set environment variables in Vercel dashboard:
+```
+VITE_SHIELD_VAULT=0x...
+VITE_TIMELOCK=0x...
+... (see .env.example)
+```
 
 ## Architecture
 
 ```
 src/
-├── App.jsx       ← Router: / → Landing, /app → PrivARCOS
-├── Landing.jsx   ← Marketing vitrine (features, roadmap, stats)
-├── DApp.jsx      ← Full PrivARC OS (Web3, ZK, AI agents, 14 panels)
-└── main.jsx      ← React root
+├── main.jsx       — React entry point
+├── App.jsx        — Router (/ → Landing, /app → DApp)
+├── Landing.jsx    — Marketing page
+├── DApp.jsx       — Full PrivARC OS DApp (all panels)
+└── contracts.js   — Contract addresses + ABI calldata builders
+                     Auto-loaded from ../privarc-contracts-v2/deployments/latest.json
 ```
 
-### Routing
+## Deployed addresses — Arc Testnet (latest.json v2.1.0 — 2026-06-08)
 
-| URL | Component | Description |
-|-----|-----------|-------------|
-| `/` | `<Landing>` | Marketing landing page |
-| `/app` | `<PrivARCOS>` | Full DApp (wallet auth, shield, swap, governance…) |
+| Contract            | Address                                      |
+|---------------------|----------------------------------------------|
+| USDC                | `0x3600000000000000000000000000000000000000` |
+| CCTP_TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| Timelock            | `0x3a9BeAA75bd8b4f975C29AA78744834531E16799` |
+| Governance          | `0x70F71a1CB248Dd900f3d7D39C4a4a54BA5d986d0` |
+| Staking             | `0x6841c7A3938791DDFDB90f31acC7072F7B1c967A` |
+| MockVerifierZK      | `0x8569c0D493c837A7618164DC8DE5BaF68C36e736` |
+| NullifierRegistry   | `0x28AFBbd86841f6eb2A219F4f8Ff69c577F30ADE1` |
+| MerkleTreeManager   | `0x80333Bf880b28A98b5206216edc4a8Cde0958979` |
+| DepositManager      | `0xFabE444BC5231a7cdF61f4346321517aF82162F7` |
+| WithdrawalManager   | `0xb37Ade468163FE3dCBB39ba1343651d7499dB3a2` |
+| ShieldedTransfer    | `0x3C821bd2d510170b11Dc049D5CE988B605Fc1658` |
+| PrivateSwap         | `0x01A06c330d9baEA60C5fc9D9b0AA2510E90C77dA` |
+| PrivateBridge       | `0xF5206339d4E6c9712Ec4570A762a04E2fCdA44B0` |
+| EmergencyController | `0xc44B286E65bAa36597980e48E879d317f954B94E` |
+| ShieldVault         | `0x0352A0cAAEA755e0D1D6c4040c084eA731b5D454` |
 
-Zero external router dependency — pure `window.history.pushState`.
-Vercel rewrites all routes to `index.html` (configured in `vercel.json`).
-
-### Bundle splitting (Vite)
-
-| Chunk | Contents | When loaded |
-|-------|----------|-------------|
-| `react` | react + react-dom | Both routes |
-| `landing` | Landing.jsx | `/` only |
-| `dapp` | DApp.jsx | `/app` only |
-
-The DApp (~150KB source) is only loaded when the user navigates to `/app`.
-
----
-
-## Features
-
-### Landing page (`/`)
-- Animated hex grid background (canvas)
-- Glitch logo animation
-- Live terminal animation (AI agent logs)
-- Stats counters with intersection observer
-- Feature cards (9 features)
-- Architecture diagram
-- How It Works (4 steps)
-- Roadmap (Q3 2026 → Q2 2027)
-- CTA section + Footer
-- Scroll-reveal animations
-
-### PrivARC OS DApp (`/app`)
-- **Auth**: Wallet-only (EIP-191) — 8 providers: MetaMask, Rabby, WalletConnect, Coinbase, Trust, OKX, TokenPocket, Brave
-- **Real Arc Testnet** (chainId 5042002) — real USDC balance, real transactions
-- **Shield**: Deposit USDC → ZK commitment on-chain
-- **Private Swap**: ZK-routed token exchange
-- **Private Send**: Stealth address transfer
-- **Withdraw**: Groth16 ZK proof → exit funds
-- **Bridge**: CCTP v2 cross-chain (6 chains)
-- **Analytics**: TVL charts, TX heatmap, real CoinGecko prices
-- **ZK Console**: Groth16 + PLONK proof generation
-- **Governance**: On-chain voting (PIP proposals)
-- **Staking**: USDC yield, 4 lock periods, 1×–3× multipliers
-- **Portfolio**: Asset allocation, report export
-- **AI Agents**: 8 autonomous on-chain agents
-- **History**: Transaction log with ARCScan links
-- **Settings**: Network config, slippage, expert mode
-- **Disconnect**: Confirmation modal
-
----
-
-## Arc Testnet
-
-```json
-{
-  "chainId":    5042002,
-  "chainIdHex": "0x4cef52",
-  "rpcUrl":     "https://rpc.testnet.arc.network",
-  "explorer":   "https://testnet.arcscan.app",
-  "faucet":     "https://faucet.circle.com",
-  "currency":   "USDC"
-}
-```
-
----
-
-## Getting Started
-
-```bash
-npm install
-npm run dev
-# → http://localhost:5173       landing page
-# → http://localhost:5173/app   PrivARC OS DApp
-```
-
-### Build
-
-```bash
-npm run build
-# → dist/  (3 chunks: react, landing, dapp)
-npm run preview
-```
-
----
-
-## Deploy on Vercel
-
-### Method 1 — GitHub Import
-
-1. Push to GitHub (see procedure below)
-2. Go to [vercel.com/new](https://vercel.com/new)
-3. Import `privarc-os`
-4. Framework: **Vite** — Build: `npm run build` — Output: `dist`
-5. Deploy ✓
-
-### Method 2 — Vercel CLI
-
-```bash
-npm i -g vercel
-vercel --prod
-```
-
----
-
-## GitHub Push Procedure
-
-```bash
-git init
-git add .
-git commit -m "feat: PrivARC OS v10 — unified landing + DApp
-
-Architecture:
-- / → Landing vitrine (marketing, features, roadmap)
-- /app → PrivARC OS DApp (full Web3 + ZK + 14 panels)
-- Single Vite project, single Vercel deployment
-- Bundle split: landing / dapp loaded independently
-- Real Arc Testnet (chainId 5042002)
-- Real USDC balance via eth_getBalance
-- Real wallet transactions via eth_sendTransaction
-- CoinGecko live prices (USDC/WETH/WBTC)
-- 8 wallet providers supported"
-
-gh repo create privarc-os \
-  --public \
-  --description "PrivARC OS — Landing page + DApp on Arc Testnet" \
-  --source=. --remote=origin --push
-
-git tag v10.0.0 -m "PrivARC OS v10.0.0"
-git push origin v10.0.0
-```
-
----
-
-## Versioning
-
-| Version | Key Feature |
-|---------|-------------|
-| v1–v3 | Auth iterations (email → wallet) |
-| v4–v6 | OS panels, analytics, ZK console |
-| v7–v8 | Live prices, notifications, production-ready |
-| v9 | Real Arc Testnet on-chain (chainId 5042002) |
-| **v10** | **Unified: landing + DApp, one repo, one deployment** |
-
----
-
-## License
-
-MIT © 2024 PrivARC
+Deployer: `0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894`
