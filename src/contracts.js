@@ -1,35 +1,29 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  PrivARC OS — Contract Config v3.0.0
-//  
-//  BREAKING CHANGES vs v2.x:
-//  - All calldata builders rewritten with correct ABI encoding
-//  - Selectors verified against IModules.sol struct definitions
-//  - Native USDC (Arc Testnet) flow corrected: msg.value = amount * 1e12
-//  - ShieldedSend properly routes through ShieldVault.shieldedSend()
-//  - Balance display: USDC (native gas, read as eth_getBalance / 1e12)
+//  PrivARC OS — Contract Config v3.1.0
+//
+//  Addresses synced with latest.json v2.3.0 — Arc Testnet — 2026-06-09
+//  Deployer: 0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894
 //
 //  ADDRESSES: sourced from VITE_ env vars (Vercel) or hardcoded fallbacks
-//  Fallbacks: latest.json v2.1.0 — Arc Testnet — 2026-06-08
-//  Deployer:  0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894
 // ════════════════════════════════════════════════════════════════════════════
 
 export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x0352A0cAAEA755e0D1D6c4040c084eA731b5D454",
-  Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x3a9BeAA75bd8b4f975C29AA78744834531E16799",
-  Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x70F71a1CB248Dd900f3d7D39C4a4a54BA5d986d0",
-  Staking:             import.meta.env.VITE_STAKING               ?? "0x6841c7A3938791DDFDB90f31acC7072F7B1c967A",
-  NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0x28AFBbd86841f6eb2A219F4f8Ff69c577F30ADE1",
-  MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x80333Bf880b28A98b5206216edc4a8Cde0958979",
-  DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xFabE444BC5231a7cdF61f4346321517aF82162F7",
-  WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0xb37Ade468163FE3dCBB39ba1343651d7499dB3a2",
-  ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0x3C821bd2d510170b11Dc049D5CE988B605Fc1658",
-  PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0x01A06c330d9baEA60C5fc9D9b0AA2510E90C77dA",
-  PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0xF5206339d4E6c9712Ec4570A762a04E2fCdA44B0",
-  EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0xc44B286E65bAa36597980e48E879d317f954B94E",
-  MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0x8569c0D493c837A7618164DC8DE5BaF68C36e736",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x9D90f31a7E848A9b23Bc74f29ec6DDD49fAd2eed",
+  Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x610Ac4c608BDa6d7a7c9EE92E80E636dA693C9C1",
+  Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0xd90450f078B0ae9a2bcb6fC9ce91bbB577761aaa",
+  Staking:             import.meta.env.VITE_STAKING               ?? "0x7020421318F41F9A11Ba25a19Ee59Da652a775Cf",
+  NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0xFA80cB08e92323ABb6110d2A5E3f0CBa228BFFc2",
+  MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x5Ab317C4bb24a2CD3Fa79Fe85AfA52C4A32462B0",
+  DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0x3f59AC80EA087cC08D85c40aA29335ed57E64032",
+  WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0x15244f75dE6221D3E290740dEd52Ec3217C8EC5D",
+  ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0xbBf614Dd567A98d8879b68Ebc3b9F34aC8732CF6",
+  PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0xa091603CfDDf533937aB68DF55E9295F9aAd38d1",
+  PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0x7f7688BD2a53B653C670A0552d8674a909Bd3d9F",
+  EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0x7eCAfef63ad0a2Fb3734843AeeF275ACDC216b1F",
+  MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0xF9cC4B19d76709ec33087224f876c4834978f3AD",
 };
 
 export const CONTRACTS = {
@@ -38,8 +32,9 @@ export const CONTRACTS = {
   // EURC: official Arc Testnet address not yet published by Circle.
   // Set VITE_EURC_ADDRESS in Vercel env vars once Circle deploys on Arc.
   // Until then bridge panel will show a clear error (cannot approve native USDC).
-  EURC:                import.meta.env.VITE_EURC_ADDRESS   ?? "0x0000000000000000000000000000000000000000",
-  cirBTC:              import.meta.env.VITE_CIRBTC_ADDRESS ?? "0x0000000000000000000000000000000000000000",
+  // EURC + cirBTC — real addresses from latest.json v2.3.0 (Arc Testnet, 2026-06-09)
+  EURC:                import.meta.env.VITE_EURC_ADDRESS   ?? "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+  cirBTC:              import.meta.env.VITE_CIRBTC_ADDRESS ?? "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",
   CCTP_TokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
   // Deployed by PrivARC
   ShieldVault:         _c.ShieldVault,
@@ -80,19 +75,19 @@ export const TOKENS = {
     color:      "#003087",
     logo:       "💶",
     isNative:   false,
-    deployed:   CONTRACTS.EURC !== "0x0000000000000000000000000000000000000000",
+    deployed:   true,  // confirmed: 0x89B508... (latest.json v2.3.0)
   },
   cirBTC: {
     address:    CONTRACTS.cirBTC,
     symbol:     "cirBTC",
     name:       "Canonical BTC",
     decimals:   8,
-    minDeposit: 10_000n,      // 0.0001 cirBTC
+    minDeposit: 10_000n,
     minDisplay: "0.0001 cirBTC",
     color:      "#F7931A",
     logo:       "₿",
     isNative:   false,
-    deployed:   CONTRACTS.cirBTC !== "0x0000000000000000000000000000000000000000",
+    deployed:   true,  // confirmed: 0xf0C4a4... (latest.json v2.3.0)
   },
 };
 
@@ -143,24 +138,25 @@ export const SEL = {
   // If deployment reverts with "function not found", verify with:
   //   cast sig "deposit((bytes32,address,uint256,(uint256[2],uint256[2][2],uint256[2]),uint256[]))"
   deposit:            "0xbd673975",  // deposit((bytes32,address,uint256,(uint256[2],uint256[2][2],uint256[2]),uint256[]))
-  withdraw:           "0x2e1a7d4d",  // withdraw(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,address,uint256,uint256,address,uint256[]))
-  shieldedSend:       "0x3a4cd7e1",  // shieldedSend((bytes32[],(uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32[],uint256[]))
-  privateSwapExec:    "0x4e58b9a3",  // privateSwapExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,bytes32,address,address,uint256,uint256,uint256,address,bytes,uint256[]))
-  privateBridgeExec:  "0x7c025200",  // privateBridgeExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,uint32,address,uint256,bytes32,uint256,uint256[]))
+  withdraw:           "0x3dd75908",  // withdraw(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,address,address,uint256,uint256,address,uint256[]))
+  shieldedSend:       "0x5635a2e7",  // shieldedSend((bytes32[],(uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32[],uint256[]))
+  privateSwapExec:    "0x49fa2a6e",  // privateSwapExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,bytes32,address,address,uint256,uint256,uint256,address,bytes,uint256[]))
+  privateBridgeExec:  "0x8fa6444e",  // privateBridgeExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,uint32,address,uint256,bytes32,uint256,uint256[]))
 
   // ShieldVault views
   totalShielded:      "0x6d7f2685",  // totalShielded(address)
+  totalShieldedUSDC:  "0x37b12e9e",  // totalShieldedUSDC()
 
   // MerkleTreeManager
   nextLeafIndex:      "0x0be4f422",  // nextLeafIndex()
   getLastRoot:        "0xba70f757",  // getLastRoot()
-  isKnownRoot:        "0x6cacbd79",  // isKnownRoot(bytes32)
+  isKnownRoot:        "0x6d9833e3",  // isKnownRoot(bytes32)
 
   // EmergencyController
   pauseState:         "0xd7118351",  // pauseState()
   depositsAllowed:    "0x8f76137f",  // depositsAllowed()
   withdrawalsAllowed: "0x4843b358",  // withdrawalsAllowed()
-  transfersAllowed:   "0x6fc1e8c0",  // transfersAllowed()
+  transfersAllowed:   "0xb0660c3d",  // transfersAllowed()
   adminReset:         "0x8c5b9b00",  // adminReset()
 
   // DepositManager
@@ -172,6 +168,7 @@ export const SEL = {
   stake:              "0x7b0472f0",  // stake(uint256,uint256)
   unstake:            "0x2e17de78",  // unstake(uint256)
   claimRewards:       "0x372500ab",  // claimRewards()
+  previewRewards:     "0xf166e920",  // previewRewards(address)
   previewRewards:     "0xf166e920",  // previewRewards(address)
 };
 
