@@ -575,6 +575,50 @@ function ArcBtn({ label, onClick, loading, disabled, color="#00FFB0", small=fals
   );
 }
 
+// ── Transaction confirmation modal ────────────────────────────────────────────
+// Shown BEFORE eth_sendTransaction — user sees the real amount even when
+// wallet displays "value: 0 USDC" for ERC-20 / ZK shielded transactions.
+function TxConfirmModal({ open, onConfirm, onCancel, tx }) {
+  if (!open || !tx) return null;
+  const { label, token, amount, to, note } = tx;
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.85)", zIndex:9999, display:"flex", alignItems:"flex-end", justifyContent:"center", padding:"0 0 24px" }}
+      onClick={e => e.target===e.currentTarget && onCancel()}>
+      <div style={{ background:"#0a1628", border:"1px solid rgba(0,255,176,.25)", borderRadius:8, padding:"18px 18px 12px", width:"100%", maxWidth:420, margin:"0 12px" }}>
+        <div style={{ fontFamily:"monospace", fontSize:10, color:"#64748b", letterSpacing:".16em", marginBottom:10 }}>CONFIRM TRANSACTION</div>
+        <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"12px 14px", marginBottom:10 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>ACTION</span>
+            <span style={{ fontSize:10, color:"#00FFB0", fontFamily:"monospace", fontWeight:700 }}>{label}</span>
+          </div>
+          {amount != null && (
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
+              <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>AMOUNT</span>
+              <span style={{ fontSize:14, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>{amount} <span style={{ color:"#00FFB0" }}>{token}</span></span>
+            </div>
+          )}
+          {to && (
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
+              <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>TO</span>
+              <span style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>{to.slice(0,10)}…{to.slice(-8)}</span>
+            </div>
+          )}
+          {note && (
+            <div style={{ marginTop:8, fontSize:8, color:"#4a7c5f", fontFamily:"monospace", lineHeight:1.5, borderTop:"1px solid rgba(0,255,176,.06)", paddingTop:8 }}>{note}</div>
+          )}
+        </div>
+        <div style={{ fontSize:8, color:"#334155", fontFamily:"monospace", marginBottom:12, lineHeight:1.5 }}>
+          ℹ Your wallet may show <b style={{ color:"#64748b" }}>value: 0</b> for ERC-20 and ZK transactions — this is normal. The amount above is encoded in the calldata.
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={onCancel} style={{ flex:1, padding:"10px 0", background:"transparent", border:"1px solid rgba(100,116,139,.3)", borderRadius:3, color:"#64748b", fontSize:10, fontFamily:"monospace", cursor:"pointer" }}>CANCEL</button>
+          <button onClick={onConfirm} style={{ flex:2, padding:"10px 0", background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.4)", borderRadius:3, color:"#00FFB0", fontSize:10, fontFamily:"monospace", cursor:"pointer", fontWeight:700, letterSpacing:".1em" }}>⟶ CONFIRM IN WALLET</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OsField({ label, type="text", value, onChange, placeholder, icon, error, readOnly, suffix, hint }) {
   const [foc, setFoc] = useState(false);
   const [sp, setSp]   = useState(false);
@@ -1522,7 +1566,17 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   const [amount, setAmount] = useState("");
   const [tokenIdx, setTokenIdx] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [confirmTx, setConfirmTx] = useState(null); // pending TxConfirmModal
+  const confirmRef = useRef(null);                   // resolves the modal promise
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+
+  // Ask user to confirm before hitting wallet — shows real amount for ERC-20 / ZK txs
+  const askConfirm = (txInfo) => new Promise(resolve => {
+    confirmRef.current = resolve;
+    setConfirmTx(txInfo);
+  });
+  const onConfirm = () => { setConfirmTx(null); confirmRef.current?.(true); };
+  const onCancel  = () => { setConfirmTx(null); confirmRef.current?.(false); };
 
   const token = TOKEN_LIST[tokenIdx] || TOKEN_LIST[0];
 
@@ -1590,6 +1644,17 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     // For EURC/cirBTC: value = 0x0, standard ERC-20 transferFrom
     const { data: depositData, value: depositValue } = buildDepositCalldata(commitment, token.address, amountBig);
 
+    // Show confirmation modal before hitting wallet — shows real amount (wallet shows value=0 for ERC-20)
+    const confirmed = await askConfirm({
+      label:  `Shield ${token.symbol}`,
+      amount,
+      token:  token.symbol,
+      note:   token.isNative
+        ? "Native USDC — wallet will show the USDC value correctly. 1 transaction."
+        : `ERC-20 deposit — your wallet will show value: 0. The amount above is encoded in the calldata. 2 transactions: Approve then Deposit.`,
+    });
+    if (!confirmed) { setLoading(false); return; }
+
     const ok = await sendRealTx({
       label: `Shield ${token.symbol}`,
       description: `Shielding ${amount} ${token.symbol} into ShieldVault`,
@@ -1602,7 +1667,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
       notes.push(note);
       localStorage.setItem("privarc_notes", JSON.stringify(notes));
-      notify("Note saved", "Your shielded note is stored locally. Keep it safe — it proves ownership.", "info");
+      notify("Shield ✓", `${amount} ${token.symbol} shielded — note saved in browser storage.`, "success");
     }
 
     setAmount(""); setLoading(false);
@@ -1623,6 +1688,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
+      <TxConfirmModal open={!!confirmTx} tx={confirmTx} onConfirm={onConfirm} onCancel={onCancel}/>
       <PH icon="🛡" title="SHIELD" sub="Deposit into ShieldVault v2 — Arc Testnet"/>
       <NotOnArcWarning/>
       {/* Live stats */}
@@ -1795,6 +1861,11 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const [resolving, setResolving]=useState(false); const [resolved, setResolved]=useState(null);
   const [mode, setMode]=useState("shielded");
+  const [confirmTx, setConfirmTx] = useState(null);
+  const confirmRef = useRef(null);
+  const askConfirm = (txInfo) => new Promise(resolve => { confirmRef.current = resolve; setConfirmTx(txInfo); });
+  const onConfirm  = () => { setConfirmTx(null); confirmRef.current?.(true); };
+  const onCancel   = () => { setConfirmTx(null); confirmRef.current?.(false); };
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
 
   useEffect(()=>{
@@ -1843,9 +1914,19 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
 
     const { data } = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut });
 
+    // Show confirmation — wallet will display value: 0 (ZK tx, no ETH moved)
+    const confirmed = await askConfirm({
+      label:  "Shielded Send",
+      amount,
+      token:  "USDC",
+      to:     dest,
+      note:   "ZK transaction — your wallet will show value: 0. No funds move on-chain: only the Merkle commitment is transferred. The recipient redeems via Withdraw.",
+    });
+    if (!confirmed) { setLoading(false); return; }
+
     const ok = await sendRealTx({
       label: "Shielded Send",
-      description: `Private ${amount} USDC → ShieldVault (untraceable on ARCScan)`,
+      description: `Private ${amount} USDC → ${dest.slice(0,8)}… (untraceable on ARCScan)`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
     });
 
@@ -1872,6 +1953,7 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
+      <TxConfirmModal open={!!confirmTx} tx={confirmTx} onConfirm={onConfirm} onCancel={onCancel}/>
       <PH icon="↗" title="SEND" sub="Shielded send (private) or direct transfer (public)"/>
       <NotOnArcWarning/>
       <div style={{ display:"flex", gap:7, marginBottom:14 }}>
