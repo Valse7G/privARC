@@ -2877,67 +2877,6 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 }
 
 
-  const stake=async()=>{
-    if(!stakeAmt)return;setStaking(true);
-    const amtWei=BigInt(Math.round(Number(stakeAmt)*1e6));
-    const appD=buildApproveCalldata(CONTRACTS.Staking,amtWei);
-    const okS=await sendRealTx({label:"Approve USDC",description:`Approving ${stakeAmt} USDC for Staking`,buildTx:()=>({to:CONTRACTS.USDC,value:"0x0",data:appD})});
-    if(okS) await sendRealTx({label:"Stake",description:`Staking ${stakeAmt} USDC (${lock}d lock)`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:buildStakeCalldata(amtWei,lock)})});
-    setStakeAmt("");setStaking(false);
-  };
-  const claim=async()=>{
-    setClaiming(true);
-    await sendRealTx({label:"Claim Rewards",description:"Claiming staking rewards",buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:SEL.claimRewards})});
-    setClaiming(false);
-  };
-
-  return (
-    <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="💎" title="STAKING" sub="Stake USDC on Arc Testnet — real transactions"/>
-      <NotOnArcWarning/>
-      <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>
-        ℹ Real transactions on Arc Testnet. Wallet will prompt for each operation. Gas paid in USDC.
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:7, marginBottom:14 }}>
-        {[{l:"BALANCE",v:usdcBalance!==null?fmtUsdc(usdcBalance):"—",u:"USDC",c:"#00FFB0"},{l:"STAKING APY",v:lk?.apy||"—",u:lk?.mult+" mult",c:"#a78bfa"},{l:"LOCK",v:lk?.d+"d",u:"selected period",c:"#fbbf24"}].map(s=><div key={s.l} style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"10px 12px" }}><div style={{ fontSize:7, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:4 }}>{s.l}</div><div style={{ fontSize:16, fontWeight:700, color:s.c, fontFamily:"monospace" }}>{s.v}</div><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:1 }}>{s.u}</div></div>)}
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-        <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px" }}>
-          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>STAKE USDC</div>
-          <OsField label="AMOUNT" value={stakeAmt} onChange={e=>setStakeAmt(e.target.value)} placeholder="0.00" icon="💎" suffix="USDC"/>
-          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".12em", fontFamily:"monospace", marginBottom:6 }}>LOCK PERIOD</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:4, marginBottom:8 }}>
-            {LOCKS.map(l=><button key={l.d} onClick={()=>setLock(l.d)} style={{ padding:"6px 4px", background:lock===l.d?"rgba(0,255,176,.1)":"rgba(0,0,0,.3)", border:`1px solid ${lock===l.d?"rgba(0,255,176,.4)":"rgba(0,255,176,.1)"}`, borderRadius:3, cursor:"pointer", textAlign:"center", transition:"all .2s" }}><div style={{ fontSize:9, color:lock===l.d?"#ffffff":"#94a3b8", fontFamily:"monospace", fontWeight:700 }}>{l.d}d</div><div style={{ fontSize:7, color:lock===l.d?"#4ade80":"#64748b", fontFamily:"monospace" }}>{l.apy}</div></button>)}
-          </div>
-          <ArcBtn label={staking?"Staking...":"⟶ STAKE (REAL TX)"} onClick={onArc?stake:undefined} loading={staking} disabled={!stakeAmt||Number(stakeAmt)<=0||!onArc} small color={onArc?"#00FFB0":"#F59E0B"}/>
-        </div>
-        <div style={{ display:"grid", gridTemplateRows:"1fr 1fr", gap:8 }}>
-          <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
-            <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>UNSTAKE</div>
-            <OsField label="STAKE INDEX (0, 1, 2...)" value={unstakeAmt} onChange={e=>setUnstakeAmt(e.target.value)} placeholder="0" icon="↙" hint="Enter position index from getUserStakes()"/>
-            <ArcBtn label={unstaking?"Unstaking...":"UNSTAKE"} onClick={async()=>{
-    if(!unstakeAmt||!onArc)return;
-    setUnstaking(true);
-    // FIX F-04: unstake(uint256 stakeId) expects a stake INDEX (0, 1, 2...)
-    // Previous bug: was encoding unstakeAmt*1e6 as wei amount — always reverts (invalid index)
-    // User enters the stake index (0-based) to unstake
-    const stakeIndex = BigInt(Math.floor(Number(unstakeAmt)));
-    const unstakeData = SEL.unstake + encodeUint256(stakeIndex);
-    await sendRealTx({label:"Unstake",description:`Unstaking position #${stakeIndex}`,buildTx:()=>({to:CONTRACTS.Staking,value:"0x0",data:unstakeData})});
-    setUnstakeAmt("");setUnstaking(false);}} loading={unstaking} disabled={!unstakeAmt||!onArc} color="#4ade80" small/>
-          </div>
-          <div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"11px" }}>
-            <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:4 }}>PENDING REWARDS</div>
-            <div style={{ fontSize:20, fontWeight:700, color:"#fbbf24", fontFamily:"monospace", marginBottom:3 }}>—</div>
-            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:8 }}>Connect to view</div>
-            <ArcBtn label={claiming?"Claiming...":"⟶ CLAIM"} onClick={onArc?claim:undefined} loading={claiming} disabled={!onArc} color="#fbbf24" small/>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function PortfolioPanel({ account, balance, usdcBalance, prices }) {
   const [eurcBal, setEurcBal] = useState(null);
   const [cbtcBal, setCbtcBal] = useState(null);
