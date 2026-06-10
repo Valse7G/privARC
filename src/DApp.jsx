@@ -2185,7 +2185,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       </div>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
-      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Available", bals ? (bals.usdc).toFixed(2) + " USDC","local notes"],["Gas","USDC","Arc Testnet"]]}/>
+      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Available", bals ? bals.usdc.toFixed(2) + " USDC" : "—","local notes"],["Gas","USDC","Arc Testnet"]]}/>
       {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes found. Use the Shield panel to deposit USDC first.
