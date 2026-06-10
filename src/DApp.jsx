@@ -1450,19 +1450,23 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, set
    PROTOCOL STATS — Live on-chain reads (ShieldVault v2.0.0)
 ═══════════════════════════════════════════════════════════════ */
 function useProtocolStats(onArc) {
-  const [stats, setStats] = useState({ shieldedUsdc:null, shieldedEurc:null, shieldedBtc:null, leafCount:null, pauseState:null, depositsAllowed:null });
+  const [stats, setStats] = useState({ shieldedUsdc:null, shieldedEurc:null, shieldedBtc:null, leafCount:null, pauseState:null, depositsAllowed:null, tokenSupport:{} });
   useEffect(() => {
     if (!onArc) return;
     const fetch = async () => {
       try {
         const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
-        const [su, se, sb, leaf, pause, depsOk] = await Promise.all([
-          call(CONTRACTS.ShieldVault, SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
-          call(CONTRACTS.ShieldVault, SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
-          call(CONTRACTS.ShieldVault, SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
-          call(CONTRACTS.MerkleTreeManager, SEL.nextLeafIndex),
+        const [su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc] = await Promise.all([
+          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
+          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
+          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
+          call(CONTRACTS.MerkleTreeManager,   SEL.nextLeafIndex),
           call(CONTRACTS.EmergencyController, SEL.pauseState),
           call(CONTRACTS.EmergencyController, SEL.depositsAllowed),
+          // Pre-flight: check registered tokens in DepositManager
+          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
+          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
+          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
         ]);
         setStats({
           shieldedUsdc:    decodeUint256(su),
@@ -1471,6 +1475,11 @@ function useProtocolStats(onArc) {
           leafCount:       decodeUint256(leaf),
           pauseState:      decodeUint8(pause),
           depositsAllowed: decodeUint8(depsOk) !== 0,
+          tokenSupport: {
+            [CONTRACTS.USDC]:   tUsdc && tUsdc !== "0x" && BigInt(tUsdc) === 1n,
+            [CONTRACTS.EURC]:   tEurc && tEurc !== "0x" && BigInt(tEurc) === 1n,
+            [CONTRACTS.cirBTC]: tBtc  && tBtc  !== "0x" && BigInt(tBtc)  === 1n,
+          },
         });
       } catch(e) { console.warn("stats fetch:", e); }
     };
@@ -1534,6 +1543,33 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       setLoading(false); return;
     }
 
+    // ── PRE-FLIGHT: verify token is registered in DepositManager ──────────
+    // Arc Testnet truncates revert data in receipts ("0x" on ARCScan).
+    // The most common cause of deposit failure is TokenNotSupported —
+    // addToken() was not called on DepositManager after deployment.
+    // We check this BEFORE sending the tx to give a clear error.
+    try {
+      const isSupportedData = SEL.isTokenSupported + encodeAddress(token.address);
+      const res = await rpcCall("eth_call", [
+        { to: CONTRACTS.DepositManager, data: isSupportedData },
+        "latest",
+      ]);
+      // Returns bool: 0x00...01 = true, 0x00...00 = false
+      const isSupported = res && res !== "0x" && BigInt(res) === 1n;
+      if (!isSupported) {
+        notify(
+          "Deposit blocked",
+          `${token.symbol} is not registered in DepositManager. ` +
+          `Run: npm run fix:testnet in privarc-contracts-v2 to register the token on-chain.`,
+          "error"
+        );
+        setLoading(false); return;
+      }
+    } catch {
+      // If the pre-flight call itself fails (network issue), warn but proceed
+      notify("Deposit", "Could not verify token support — proceeding anyway.", "warning");
+    }
+
     // Step 1: ERC-20 approve (skip for native USDC — uses msg.value instead)
     if (needsApproveBeforeDeposit(token.address)) {
       const approved = await sendRealTx({
@@ -1579,6 +1615,12 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   const vaultOk  = ps?.pauseState === 0;
   const leafCnt  = ps?.leafCount != null ? ps.leafCount.toString() : "—";
 
+  // Token registration status — if false, deposit will revert TokenNotSupported
+  const tokenSupport  = ps?.tokenSupport || {};
+  const selectedSupported = onArc
+    ? tokenSupport[token?.address?.toLowerCase?.()] ?? tokenSupport[token?.address] ?? null
+    : null;
+
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="🛡" title="SHIELD" sub="Deposit into ShieldVault v2 — Arc Testnet"/>
@@ -1616,12 +1658,26 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
         <OsField label={`${token.symbol} AMOUNT`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon={token.logo} suffix={token.symbol}/>
         <IG items={[["Protocol Fee","0.00","Launch phase"],["Gas","USDC","Arc Testnet"],["Privacy","ZK proof","On-chain"]]}/>
       </div>
-      <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:3, padding:"8px 11px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5 }}>
-        ℹ 2 transactions: Approve {token.symbol} → Deposit. Gas paid in USDC on Arc Testnet.
+      <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:3, padding:"8px 11px", marginBottom:8, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5 }}>
+        ℹ {token.isNative ? "1 transaction: Deposit (native USDC via msg.value)." : `2 transactions: Approve ${token.symbol} → Deposit.`} Gas paid in USDC on Arc Testnet.
         <br/>Need tokens? <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>faucet.circle.com ↗</a>
         {" · "}<a href={`${ARC_TESTNET.explorer}/address/${CONTRACTS.ShieldVault}`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>ShieldVault ↗</a>
       </div>
-      <ArcBtn label={onArc?`⟶ SHIELD ${token.symbol} (REAL TX)`:"⚠ SWITCH TO ARC TESTNET FIRST"} onClick={onArc?submit:undefined} loading={loading} disabled={!onArc||!amount||isNaN(parseFloat(amount))||parseFloat(amount)<=0} color={onArc?"#00FFB0":"#F59E0B"}/>
+
+      {/* Token registration status — shown when connected */}
+      {onArc && selectedSupported === false && (
+        <div style={{ background:"rgba(239,68,68,.06)", border:"1px solid rgba(239,68,68,.3)", borderRadius:3, padding:"8px 11px", marginBottom:8, fontSize:9, color:"#f87171", fontFamily:"monospace", lineHeight:1.6 }}>
+          ⚠ {token.symbol} is not registered in DepositManager — deposit will revert.<br/>
+          Fix: <span style={{ color:"#fca5a5" }}>cd privarc-contracts-v2 &amp;&amp; npm run fix:testnet</span>
+        </div>
+      )}
+      {onArc && selectedSupported === true && (
+        <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.12)", borderRadius:3, padding:"6px 11px", marginBottom:8, fontSize:9, color:"#00FFB0", fontFamily:"monospace" }}>
+          ✓ {token.symbol} registered in DepositManager — ready to shield
+        </div>
+      )}
+
+      <ArcBtn label={onArc ? (selectedSupported === false ? `⚠ ${token.symbol} NOT REGISTERED` : `⟶ SHIELD ${token.symbol} (REAL TX)`) : "⚠ SWITCH TO ARC TESTNET FIRST"} onClick={onArc && selectedSupported !== false ? submit : undefined} loading={loading} disabled={!onArc || selectedSupported === false || !amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0} color={selectedSupported === false ? "#ef4444" : onArc ? "#00FFB0" : "#F59E0B"}/>
     </div>
   );
 }

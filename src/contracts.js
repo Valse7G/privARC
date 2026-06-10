@@ -251,8 +251,11 @@ export function buildDepositCalldata(commitment, tokenAddress, amount) {
   const amt32   = encodeUint256(amount);
   const tok32   = encodeAddress(tokenAddress);
 
-  // Dynamic publicInputs: offset from start of struct = 11 * 32 = 352 = 0x160
-  const dynOff  = encodeUint256(0x160n);
+  // ABI offset to publicInputs from struct start:
+  // Head = 12 words: commitment(1) + token(1) + amount(1) + proof(8) + THIS_OFFSET_FIELD(1) = 12
+  // Offset field is AT position 11×32 = 0x160
+  // Dynamic data starts AFTER the offset field = at 12×32 = 0x180
+  const dynOff  = encodeUint256(0x180n);  // ← was 0x160 (pointed to offset field itself → revert)
   const pubLen  = encodeUint256(1n);
   const pubVal  = comm32; // publicInputs[0] = commitment
 
@@ -301,11 +304,12 @@ export function buildDepositCalldata(commitment, tokenAddress, amount) {
 //   relayer        address
 //   publicInputs   uint256[]    ← dynamic
 //
-// Static fields: 8 (proof) + 1 + 1 + 1 + 1 + 1 + 1 + 1 = 15 words = 0x1e0
-// publicInputs offset from struct start = 15 * 32 = 0x1e0
+// Static fields: 8 (proof) + 1 + 1 + 1 + 1 + 1 + 1 + 1 = 15 words
+// Offset field for publicInputs is at position 15×32 = 0x1e0
+// Dynamic data starts AFTER offset field = at 16×32 = 0x200
 
 export function buildWithdrawCalldata({ nullifier, root, token, recipient, amount, relayerFee = 0n, relayer = "0x0000000000000000000000000000000000000000" }) {
-  const dynOff   = encodeUint256(0x1e0n);
+  const dynOff   = encodeUint256(0x200n);  // ← was 0x1e0 (pointed to offset field itself → revert)
   const outerOff = encodeUint256(0x20n);
 
   // publicInputs = [root, nullifier, recipient (as uint256), amount, relayerFee]
@@ -461,10 +465,10 @@ export function buildPrivateSwapCalldata({ nullifier, merkleRoot, commitmentOut,
   const rdPadded = rdBytes.padEnd(Math.ceil(rdLen / 32) * 64, "0");
 
   // offsets from struct start (19 static words * 32 = 0x260):
-  const offRoute  = encodeUint256(0x260n);
-  // publicInputs after routeData: 0x260 + 2*32 + rdPadded bytes
+  const offRoute  = encodeUint256(0x260n);  // head ends at 19×32 = 0x260 → routeData tail starts here
   const rdWords   = Math.ceil(rdLen / 32);
-  const offPubIn  = encodeUint256(BigInt(0x260 + 32 + 32 + rdWords * 32));
+  // publicInputs starts after routeData tail: 0x260 + length_word(32) + data_words(rdWords×32)
+  const offPubIn  = encodeUint256(BigInt(0x260 + 32 + rdWords * 32));  // ← was +32+32 (extra word → revert)
 
   const deadlineHex = encodeUint256(BigInt(deadline || Math.floor(Date.now() / 1000) + 1200));
 
