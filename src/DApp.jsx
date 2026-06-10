@@ -1534,6 +1534,123 @@ function useProtocolStats(onArc) {
   return stats;
 }
 
+// ── Shielded balances hook ────────────────────────────────────────────────────
+// Aggregates localStorage notes per token, returns per-token balances + USD total.
+// Updates whenever notes change (storage event) or component re-renders.
+function useShieldedBalances(prices) {
+  const [bals, setBals] = useState({});
+
+  const compute = useCallback(() => {
+    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    const acc = {
+      [NATIVE_USDC]:        0n,
+      [CONTRACTS.EURC]:     0n,
+      [CONTRACTS.cirBTC]:   0n,
+    };
+    for (const n of notes) {
+      const k = n.token?.toLowerCase?.();
+      const match = Object.keys(acc).find(a => a.toLowerCase() === k);
+      if (match) acc[match] += BigInt(n.amount || 0);
+    }
+    // Convert to display values
+    const usdc  = Number(acc[NATIVE_USDC])      / 1e6;
+    const eurc  = Number(acc[CONTRACTS.EURC])   / 1e6;
+    const cbtc  = Number(acc[CONTRACTS.cirBTC]) / 1e8;
+
+    const usdcPrice = 1;                                    // USDC = $1
+    const eurcPrice = prices?.EURC  ?? prices?.EUR ?? 1.08; // ~EUR/USD
+    const btcPrice  = prices?.BTC   ?? prices?.WBTC ?? 0;
+
+    const totalUsd = usdc * usdcPrice + eurc * eurcPrice + cbtc * btcPrice;
+
+    setBals({
+      usdc, eurc, cbtc, totalUsd,
+      // raw BigInt for MAX calculations
+      rawUsdc:  acc[NATIVE_USDC],
+      rawEurc:  acc[CONTRACTS.EURC],
+      rawCbtc:  acc[CONTRACTS.cirBTC],
+      noteCount: notes.length,
+    });
+  }, [prices]);
+
+  useEffect(() => {
+    compute();
+    // Re-compute when other tabs write to localStorage
+    const handler = (e) => { if (e.key === "privarc_notes") compute(); };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, [compute]);
+
+  return { bals, recompute: compute };
+}
+
+// ── ShieldedWallet mini-panel ─────────────────────────────────────────────────
+// Shown at top of Send / Swap / Withdraw / Bridge panels.
+// Displays per-token shielded balance + MAX buttons.
+function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
+  if (!bals) return null;
+  const { usdc, eurc, cbtc, totalUsd, rawUsdc, rawEurc, rawCbtc, noteCount } = bals;
+
+  const tokens = [
+    { sym: "USDC",   val: usdc,  raw: rawUsdc,  dec: 6, fmt: v => "$" + v.toFixed(2),   color: "#00FFB0" },
+    { sym: "EURC",   val: eurc,  raw: rawEurc,  dec: 6, fmt: v => "€" + v.toFixed(2),   color: "#60a5fa" },
+    { sym: "cirBTC", val: cbtc,  raw: rawCbtc,  dec: 8, fmt: v => "₿" + v.toFixed(5),   color: "#F7931A" },
+  ].filter(t => !tokenFilter || tokenFilter.includes(t.sym));
+
+  if (compact) {
+    // Single-line version: just show available token + MAX
+    const t = tokens[0];
+    if (!t) return null;
+    return (
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+        <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>
+          Shielded {t.sym}
+        </span>
+        <button
+          onClick={() => onMax?.(t.sym, t.val, t.raw, t.dec)}
+          style={{ fontSize:9, color: t.val > 0 ? t.color : "#334155", background:"none", border:"none", cursor: t.val > 0 ? "pointer" : "default", fontFamily:"monospace", fontWeight:700 }}
+        >
+          MAX {t.fmt(t.val)}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"10px 12px", marginBottom:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+        <span style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace" }}>🛡 SHIELDED WALLET</span>
+        <span style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>
+          ≈ ${totalUsd.toFixed(2)} <span style={{ fontSize:8, color:"#4a7c5f" }}>USD</span>
+        </span>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:5 }}>
+        {tokens.map(t => (
+          <button
+            key={t.sym}
+            onClick={() => t.val > 0 && onMax?.(t.sym, t.val, t.raw, t.dec)}
+            style={{
+              background: t.val > 0 ? `rgba(${t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26"},.06)` : "rgba(0,0,0,.2)",
+              border: `1px solid ${t.val > 0 ? t.color + "30" : "rgba(255,255,255,.04)"}`,
+              borderRadius:4, padding:"7px 5px", cursor: t.val > 0 ? "pointer" : "default",
+              textAlign:"center", transition:"all .15s",
+            }}
+          >
+            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:3 }}>{t.sym}</div>
+            <div style={{ fontSize:11, color: t.val > 0 ? t.color : "#334155", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.val)}</div>
+            {t.val > 0 && <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>}
+          </button>
+        ))}
+      </div>
+      {noteCount === 0 && (
+        <div style={{ fontSize:8, color:"#F59E0B", fontFamily:"monospace", marginTop:7 }}>
+          ⚠ No shielded notes — use Shield panel first
+        </div>
+      )}
+    </div>
+  );
+}
+
 function useTxSend({ account, onArc, notify, refreshBalance }) {
   const sendRealTx = useCallback(async ({ label, description, buildTx }) => {
     if (!onArc) { notify(label, "Switch to Arc Testnet first", "error"); return false; }
@@ -1748,11 +1865,12 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   );
 }
 
-function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
-  const TK = ["USDC","WETH","WBTC","EURC"];
+function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices }) {
+  const TK = ["USDC","EURC"];
   const [fr, setFr] = useState("USDC"); const [to, setTo] = useState("EURC");
   const [amount, setAmount] = useState(""); const [q, setQ] = useState(null); const [loading, setLoading] = useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+  const { bals, recompute } = useShieldedBalances(prices);
 
   useEffect(()=>{
     if(!amount||isNaN(amount)||Number(amount)<=0){setQ(null);return;}
@@ -1844,6 +1962,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="⇄" title="PRIVATE SWAP" sub="ZK-routed exchange on Arc Testnet — real transaction"/>
       <NotOnArcWarning/>
+      <ShieldedWallet bals={bals} tokenFilter={["USDC","EURC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }}/>
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:10 }}>
         <div style={{ display:"flex", gap:8, alignItems:"flex-end", marginBottom:10 }}><div style={{ flex:1 }}><OsField label="FROM" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⬆"/></div><TS v={fr} onChange={v=>{setFr(v);if(v===to)setTo(TK.find(t=>t!==v));}}/></div>
         <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}><button onClick={()=>{setFr(to);setTo(fr);setAmount("");setQ(null);}} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.25)", borderRadius:"50%", width:30, height:30, cursor:"pointer", color:"#00FFB0", fontSize:15, display:"flex", alignItems:"center", justifyContent:"center" }}>⇅</button></div>
@@ -1857,7 +1976,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
   );
 }
 
-function SendPanel({ account, onArc, notify, refreshBalance }) {
+function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const [resolving, setResolving]=useState(false); const [resolved, setResolved]=useState(null);
   const [mode, setMode]=useState("shielded");
@@ -1867,6 +1986,7 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
   const onConfirm  = () => { setConfirmTx(null); confirmRef.current?.(true); };
   const onCancel   = () => { setConfirmTx(null); confirmRef.current?.(false); };
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+  const { bals, recompute } = useShieldedBalances(prices);
 
   useEffect(()=>{
     if(to.endsWith(".arc")){
@@ -1965,9 +2085,12 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
         ))}
       </div>
       {mode==="shielded"
-        ? <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-            🛡 Calls <code>ShieldVault.shieldedSend()</code>. No funds move — only Merkle tree state changes. Requires a shielded note (use Shield panel first).
-          </div>
+        ? <>
+            <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+            <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
+              🛡 Calls <code>ShieldVault.shieldedSend()</code>. No funds move — only Merkle tree state changes. Requires a shielded note (use Shield panel first).
+            </div>
+          </>
         : <div style={{ background:"rgba(245,158,11,.04)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
             ⚠ Direct USDC transfer. Fully visible on ARCScan. Use Shielded Send for privacy.
           </div>
@@ -1985,9 +2108,10 @@ function SendPanel({ account, onArc, notify, refreshBalance }) {
   );
 }
 
-function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
+function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices }) {
   const [amount, setAmount]=useState(""); const [dest, setDest]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+  const { bals, recompute } = useShieldedBalances(prices);
 
   const withdraw = async () => {
     // ShieldVault.withdraw(WithdrawalParams) — consumes a shielded note and sends funds to recipient.
@@ -2050,27 +2174,19 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) 
     setAmount(""); setDest(""); setLoading(false);
   };
 
-  const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
-  const totalShielded = notes.reduce((acc, n) => acc + BigInt(n.amount || 0), 0n);
-
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="↙" title="WITHDRAW" sub="Exit shielded pool → public address"/>
       <NotOnArcWarning/>
-      <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
+      <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+      <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Calls <code>ShieldVault.withdraw()</code>. Spends a shielded note and sends USDC to the destination address.
         No link between the original deposit and this withdrawal is visible on-chain.
       </div>
-      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
-        <span style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>Shielded balance (local notes)</span>
-        <button onClick={()=>setAmount((Number(totalShielded)/1e6).toFixed(2))} style={{ fontSize:9, color:"#00FFB0", background:"none", border:"none", cursor:"pointer", fontFamily:"monospace" }}>
-          MAX {(Number(totalShielded)/1e6).toFixed(2)} USDC
-        </button>
-      </div>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
-      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Notes",notes.length.toString(),"saved locally"],["Gas","USDC","Arc Testnet"]]}/>
-      {notes.length === 0 && (
+      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Available", bals ? (bals.usdc).toFixed(2) + " USDC","local notes"],["Gas","USDC","Arc Testnet"]]}/>
+      {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes found. Use the Shield panel to deposit USDC first.
         </div>
@@ -2085,10 +2201,11 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance }) 
   );
 }
 
-function BridgePanel({ account, onArc, notify, refreshBalance }) {
+function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]=useState(0); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+  const { bals, recompute } = useShieldedBalances(prices);
   const ch = CH.find(c=>c.domainId===destId) || CH[0];
 
   const bridge = async () => {
@@ -2176,6 +2293,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance }) {
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="⟺" title="BRIDGE" sub="Cross-chain USDC via CCTP v2 — Arc Testnet → other testnets"/>
       <NotOnArcWarning/>
+      <ShieldedWallet bals={bals} tokenFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Calls <code>ShieldVault.privateBridgeExec()</code> → CCTP <code>depositForBurn()</code>.
         Recipient on destination is private (embedded in ZK proof). On-chain only reveals: amount + destination domain.
@@ -2189,9 +2307,9 @@ function BridgePanel({ account, onArc, notify, refreshBalance }) {
           </button>)}
         </div>
       </div>
-      <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⟺" suffix="USDC"/>
+      <OsField label="AMOUNT (EURC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⟺" suffix="EURC"/>
       <IG items={[["Protocol","CCTP v2","Circle"],["Domain",ch?.domainId?.toString(),"CCTP"],["Recipient","Private","ZK proof"],["Time","~1–5 min","attestation"]]}/>
-      {notes.length === 0 && (
+      {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes. Use Shield panel first.
         </div>
