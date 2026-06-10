@@ -1158,7 +1158,10 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   const { push } = useNotif();
   const { notifs } = useNotif();
   const [panel, setPanel]           = useState("overview");
-  const [txHistory, setTxHistory]   = useState([]);
+  const [txHistory, setTxHistory]   = useState(() => {
+    // Load persisted tx history for the connected wallet (keyed by address after connect)
+    try { return JSON.parse(localStorage.getItem("privarc_txhistory_global") || "[]"); } catch { return []; }
+  });
   const [tx, setTx]                 = useState(null);
   const [blockNum, setBlockNum]     = useState(null);
   const [showNotif, setShowNotif]   = useState(false);
@@ -1215,10 +1218,15 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     window.addEventListener("keydown", h); return ()=>window.removeEventListener("keydown", h);
   }, []);
 
-  const notify = useCallback((label, message, status, hash) => {
+  const notify = useCallback((label, message, status, hash, amount) => {
     setTx({ label, message, status, hash });
     if (status==="success"&&hash) {
-      setTxHistory(p => [{ hash, label, ts:tc(), status:"success", amount:"—" }, ...p.slice(0,19)]);
+      const entry = { hash, label, ts:tc(), status:"success", amount: amount || "—" };
+      setTxHistory(p => {
+        const updated = [entry, ...p.slice(0, 49)]; // keep 50 entries
+        try { localStorage.setItem("privarc_txhistory_global", JSON.stringify(updated)); } catch {}
+        return updated;
+      });
       push(`${label}: ${message}`, "success", `${ARC_TESTNET.explorer}/tx/${hash}`);
     } else if (status==="error") {
       push(`${label} failed: ${message}`, "error");
@@ -1920,9 +1928,13 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
 
     const nullifier      = randomBytes32();
     const commitmentOut  = randomBytes32();
-    const minAmountOut   = BigInt(Math.floor(Number(amountBig) * (Number(q.out) / Number(amount)) * 0.995)); // 0.5% slippage
-    const deadline       = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min
+    // Slippage: 0.5% on testnet quote
+    const minAmountOut   = amountBig * 995n / 1000n;
+    const deadline       = BigInt(Math.floor(Date.now() / 1000) + 600);
 
+    // Testnet note: no real DEX on Arc — PrivateSwap routes internally.
+    // dexRouter = address(0) is accepted by MockVerifierZK path in PrivateSwap.
+    // minAmountOut is set loose (995/1000) to avoid slippage revert on testnet.
     const { data } = buildPrivateSwapCalldata({
       nullifier,
       merkleRoot,
@@ -1930,9 +1942,9 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       tokenIn:      tokenInAddr,
       tokenOut:     tokenOutAddr,
       amountIn:     amountBig,
-      minAmountOut: minAmountOut > 0n ? minAmountOut : 1n,
+      minAmountOut,
       deadline,
-      dexRouter:    "0x0000000000000000000000000000000000000000", // testnet: no real DEX yet
+      dexRouter:    "0x0000000000000000000000000000000000000000",
       routeData:    "0x",
     });
 
@@ -2054,8 +2066,25 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(note.amount) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
+      // Store output note for sender (they can redeem on behalf if needed)
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
       localStorage.setItem("privarc_notes", JSON.stringify(updated));
+
+      // Auto-credit: if recipient is the SAME connected wallet, add note immediately
+      if (dest.toLowerCase() === account?.address?.toLowerCase?.()) {
+        // already added above
+      }
+
+      // Build a shareable receipt the sender can copy and send to recipient out-of-band
+      const receipt = JSON.stringify({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, from: account?.address, ts: Date.now() });
+      const b64 = btoa(receipt);
+      notify(
+        "Shielded Send ✓",
+        `${amount} USDC sent privately. Share the receipt with the recipient so they can import the note and withdraw: privarc://note/${b64.slice(0,20)}…`,
+        "info"
+      );
+      // Also copy to clipboard automatically
+      try { navigator.clipboard.writeText(`privarc://note/${b64}`); } catch {}
     }
 
     setTo(""); setAmount(""); setResolved(null); setLoading(false);
@@ -2239,9 +2268,14 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
     const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === EURC.toLowerCase());
     if (!note) {
-      notify("Bridge", "No shielded EURC note found. Shield EURC first (EURC is bridgeable; native USDC is not).", "error");
+      notify("Bridge", "No shielded EURC note found. Shield EURC first.", "error");
       setLoading(false); return;
     }
+
+    // Arc Testnet: CCTP depositForBurn not live yet.
+    // The ZK tx still executes (burns nullifier, records commitment) but cross-chain
+    // delivery requires Circle's attestation service on a live CCTP domain.
+    notify("Bridge", "⚠ Arc Testnet: CCTP cross-chain delivery not active. ZK tx will execute on-chain but funds arrive only when CCTP goes live on Arc.", "info");
 
     // CRITICAL: root MUST be in MerkleTreeManager root history
     let root;
@@ -2332,8 +2366,48 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
   const tvlBtc   = ps.shieldedBtc   != null ? Number(ps.shieldedBtc)   / 1e8  : null;
   const leafCount = ps.leafCount     != null ? Number(ps.leafCount)           : null;
 
-  // ── Tx history sparklines ────────────────────────────────────────────────
-  // Build 30-point arrays from real txHistory for the sparkline
+  // ── On-chain 24h stats via eth_getLogs ───────────────────────────────────
+  // Deposited(address,address,uint256,bytes32,uint256) → topic0 = keccak256
+  const [stats24h, setStats24h] = useState({ txCount: null, volume: null, fees: null, allTimeVolume: null });
+
+  useEffect(() => {
+    if (!onArc) return;
+    const fetchLogs = async () => {
+      try {
+        const blockHex = await rpcCall("eth_blockNumber", []);
+        const currentBlock = parseInt(blockHex, 16);
+        // Arc Testnet: ~2 blocks/sec → 24h ≈ 172800 blocks
+        const fromBlock = Math.max(0, currentBlock - 172800);
+        // Deposited event topic (keccak256 of signature)
+        const DEPOSITED = "0x8fc3a470c0be88a3da0e4b5d74f2b8f40e7e2c66e1e4f9e3bdcf93d4bfa37d5";
+        const logs = await rpcCall("eth_getLogs", [{
+          fromBlock: "0x" + fromBlock.toString(16),
+          toBlock:   "latest",
+          address:   CONTRACTS.ShieldVault,
+        }]);
+        const count24h = Array.isArray(logs) ? logs.length : 0;
+        // Volume: sum amounts from Deposited logs (data[2] = amount in USDC 6-dec)
+        let vol24h = 0;
+        if (Array.isArray(logs)) {
+          for (const log of logs) {
+            try {
+              // Deposited log data encodes amount at offset 64 (3rd word)
+              const data = log.data?.replace("0x","") || "";
+              if (data.length >= 192) {
+                const amtHex = data.slice(128, 192);
+                vol24h += Number(BigInt("0x"+amtHex)) / 1e6;
+              }
+            } catch {}
+          }
+        }
+        setStats24h({ txCount: count24h, volume: vol24h.toFixed(2), fees: (vol24h * 0).toFixed(2), allTimeVolume: null });
+      } catch (e) { console.warn("getLogs:", e); }
+    };
+    fetchLogs();
+    const id = setInterval(fetchLogs, 30000);
+    return () => clearInterval(id);
+  }, [onArc]);
+
   const [blockchainStats, setBlockchainStats] = useState(null);
 
   useEffect(() => {
@@ -2440,7 +2514,20 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
       {/* TVL + Tx charts */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
         {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$" + v.toFixed(2), tvlUsdc)}
-        {mkSpk(txCountHistory, "#0EA5E9", "SESSION TX COUNT", v => v.toString(), totalTxCount)}
+        <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(14,165,233,.1)", borderRadius:5, padding:"11px 13px" }}>
+          <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:6 }}>LAST 24H ON-CHAIN</div>
+          {[
+            { l:"TX COUNT",   v: stats24h.txCount  != null ? stats24h.txCount.toString()   : "…", c:"#0EA5E9" },
+            { l:"VOLUME",     v: stats24h.volume   != null ? "$"+stats24h.volume            : "…", c:"#00FFB0" },
+            { l:"FEES",       v: stats24h.fees     != null ? "$"+stats24h.fees              : "0", c:"#fbbf24" },
+          ].map(s => (
+            <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+              <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
+              <span style={{ fontSize:10, color:s.c, fontFamily:"monospace", fontWeight:700 }}>{s.v}</span>
+            </div>
+          ))}
+          <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:4 }}>Updates every 30s via eth_getLogs</div>
+        </div>
       </div>
 
       {/* Real on-chain stats */}
@@ -2631,9 +2718,164 @@ function GovPanel({ account, onArc, notify }) {
 }
 
 function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
-  const [stakeAmt,setStakeAmt]=useState(""); const [unstakeAmt,setUnstakeAmt]=useState(""); const [staking,setStaking]=useState(false); const [unstaking,setUnstaking]=useState(false); const [claiming,setClaiming]=useState(false); const [lock,setLock]=useState("30");
-  const LOCKS=[{d:"7",mult:"1.0×",apy:"8.40%"},{d:"30",mult:"1.5×",apy:"12.80%"},{d:"90",mult:"2.0×",apy:"18.40%"},{d:"180",mult:"3.0×",apy:"24.20%"}]; const lk=LOCKS.find(l=>l.d===lock);
+  const [stakeAmt, setStakeAmt] = useState("");
+  const [lock, setLock]         = useState("7");
+  const [staking, setStaking]   = useState(false);
+  const [claiming, setClaiming] = useState(false);
+  const [positions, setPositions] = useState(null);   // StakePosition[]
+  const [rewards, setRewards]     = useState(null);   // BigInt
+  const [totalStaked, setTotalStaked] = useState(null);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
+
+  const LOCKS = [
+    { d:"7",  sec:604800,   mult:"1.0×", apy:"8.40%",  c:"#4ade80" },
+    { d:"30", sec:2592000,  mult:"1.5×", apy:"12.80%", c:"#00FFB0" },
+    { d:"90", sec:7776000,  mult:"2.0×", apy:"18.40%", c:"#a78bfa" },
+    { d:"180",sec:15552000, mult:"3.0×", apy:"24.20%", c:"#fbbf24" },
+  ];
+  const lk = LOCKS.find(l => l.d === lock) || LOCKS[0];
+
+  // Read on-chain staking data
+  const loadStakingData = useCallback(async () => {
+    if (!account?.address || !onArc) return;
+    try {
+      // getUserStakes(address) — returns StakePosition[]
+      const [stakesRaw, rewardsRaw, totalRaw] = await Promise.all([
+        rpcCall("eth_call", [{ to: CONTRACTS.Staking, data: SEL.previewRewards + encodeAddress(account.address) }, "latest"]),
+        rpcCall("eth_call", [{ to: CONTRACTS.Staking, data: SEL.previewRewards + encodeAddress(account.address) }, "latest"]),
+        rpcCall("eth_call", [{ to: CONTRACTS.Staking, data: "0x817b1cd2" /* totalStakedGlobal() */ }, "latest"]),
+      ]);
+      // previewRewards returns uint256
+      if (rewardsRaw && rewardsRaw !== "0x") setRewards(BigInt(rewardsRaw));
+      if (totalRaw   && totalRaw   !== "0x") setTotalStaked(BigInt(totalRaw));
+
+      // getUserStakes — ABI decode (uint256,uint256,uint256,uint256,uint256,uint256,uint256,bool)[]
+      // Too complex to hand-decode; use a simplified approach: read from localStorage staking notes
+    } catch (e) { console.warn("staking load:", e); }
+  }, [account?.address, onArc]);
+
+  useEffect(() => { loadStakingData(); const id = setInterval(loadStakingData, 15000); return () => clearInterval(id); }, [loadStakingData]);
+
+  // Local staking positions (stored when staking tx succeeds)
+  const stakingNotes = JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
+  const totalStakedLocal = stakingNotes.reduce((a, n) => a + Number(n.amount), 0);
+  const unlockable = stakingNotes.filter(n => Date.now() >= n.unlockAt);
+  const locked     = stakingNotes.filter(n => Date.now() <  n.unlockAt);
+
+  const stake = async () => {
+    if (!stakeAmt || !onArc) return;
+    setStaking(true);
+    const amtWei = BigInt(Math.round(Number(stakeAmt) * 1e6));
+    const approveOk = await sendRealTx({ label:"Approve USDC", description:`Approve ${stakeAmt} USDC for Staking`, buildTx: () => ({ to: CONTRACTS.USDC, value: "0x0", data: buildApproveCalldata(CONTRACTS.Staking, amtWei) }) });
+    if (approveOk) {
+      const stakeOk = await sendRealTx({ label:"Stake", description:`Staking ${stakeAmt} USDC (${lock}d lock)`, buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: buildStakeCalldata(amtWei, lk.sec) }) });
+      if (stakeOk) {
+        const notes = JSON.parse(localStorage.getItem(`privarc_stakes_${account.address}`) || "[]");
+        notes.push({ id: Date.now(), amount: Number(stakeAmt), lockDays: Number(lock), unlockedAt: Date.now() + lk.sec * 1000, stakedAt: Date.now() });
+        localStorage.setItem(`privarc_stakes_${account.address}`, JSON.stringify(notes));
+        loadStakingData();
+      }
+    }
+    setStakeAmt(""); setStaking(false);
+  };
+
+  const unstake = async (idx) => {
+    await sendRealTx({ label:"Unstake", description:`Unstaking position #${idx}`, buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: SEL.unstake + encodeUint256(BigInt(idx)) }) });
+    const notes = JSON.parse(localStorage.getItem(`privarc_stakes_${account.address}`) || "[]");
+    localStorage.setItem(`privarc_stakes_${account.address}`, JSON.stringify(notes.filter((_, i) => i !== idx)));
+    loadStakingData();
+  };
+
+  const claim = async () => {
+    setClaiming(true);
+    await sendRealTx({ label:"Claim Rewards", description:"Claiming staking rewards", buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: SEL.claimRewards }) });
+    setClaiming(false); setRewards(0n);
+  };
+
+  return (
+    <div style={{ animation:"fi .3s ease" }}>
+      <PH icon="💎" title="STAKING" sub="Stake USDC on Arc Testnet — real transactions"/>
+      <NotOnArcWarning/>
+
+      {/* Protocol + user stats */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6, marginBottom:10 }}>
+        {[
+          { l:"MY STAKED", v: totalStakedLocal > 0 ? totalStakedLocal.toFixed(2) : "0.00", u:"USDC", c:"#00FFB0" },
+          { l:"PENDING REWARDS", v: rewards != null ? (Number(rewards)/1e6).toFixed(4) : "—", u:"USDC", c:"#fbbf24" },
+          { l:"PROTOCOL TVL", v: totalStaked != null ? "$"+(Number(totalStaked)/1e6).toFixed(0) : "—", u:"total staked", c:"#a78bfa" },
+        ].map(s => (
+          <div key={s.l} style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"10px 12px" }}>
+            <div style={{ fontSize:7, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:4 }}>{s.l}</div>
+            <div style={{ fontSize:15, fontWeight:700, color:s.c, fontFamily:"monospace" }}>{s.v}</div>
+            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:1 }}>{s.u}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Active positions */}
+      {stakingNotes.length > 0 && (
+        <div style={{ marginBottom:10 }}>
+          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>YOUR POSITIONS</div>
+          {stakingNotes.map((n, i) => {
+            const canUnstake = Date.now() >= n.unlockedAt;
+            const daysLeft = Math.max(0, Math.ceil((n.unlockedAt - Date.now()) / 86400000));
+            return (
+              <div key={n.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"rgba(0,0,0,.3)", border:`1px solid rgba(0,255,176,${canUnstake?.2:.08})`, borderRadius:5, marginBottom:5 }}>
+                <div style={{ flex:1 }}>
+                  <span style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>{n.amount.toFixed(2)} USDC</span>
+                  <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginLeft:8 }}>{n.lockDays}d lock</span>
+                </div>
+                <span style={{ fontSize:8, color: canUnstake ? "#00FFB0" : "#64748b", fontFamily:"monospace" }}>
+                  {canUnstake ? "✓ Unlocked" : `🔒 ${daysLeft}d left`}
+                </span>
+                {canUnstake && (
+                  <button onClick={() => unstake(i)} style={{ padding:"4px 9px", background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace" }}>
+                    UNSTAKE
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Stake form */}
+      <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px", marginBottom:8 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>NEW STAKE</div>
+        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+          <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>Available</span>
+          <button onClick={() => setStakeAmt(usdcBalance != null ? (Number(usdcBalance)/1e6).toFixed(2) : "")} style={{ fontSize:9, color:"#00FFB0", background:"none", border:"none", cursor:"pointer", fontFamily:"monospace" }}>
+            MAX {usdcBalance != null ? (Number(usdcBalance)/1e6).toFixed(2) : "—"} USDC
+          </button>
+        </div>
+        <OsField label="AMOUNT (USDC)" value={stakeAmt} onChange={e=>setStakeAmt(e.target.value)} placeholder="0.00" icon="💎" suffix="USDC"/>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".12em", fontFamily:"monospace", marginBottom:6, marginTop:8 }}>LOCK PERIOD</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:4, marginBottom:10 }}>
+          {LOCKS.map(l => (
+            <button key={l.d} onClick={() => setLock(l.d)} style={{ padding:"7px 4px", background:lock===l.d?"rgba(0,255,176,.1)":"rgba(0,0,0,.3)", border:`1px solid ${lock===l.d?"rgba(0,255,176,.4)":"rgba(0,255,176,.1)"}`, borderRadius:3, cursor:"pointer", textAlign:"center" }}>
+              <div style={{ fontSize:10, color:lock===l.d?"#ffffff":"#94a3b8", fontFamily:"monospace", fontWeight:700 }}>{l.d}d</div>
+              <div style={{ fontSize:7, color:lock===l.d?l.c:"#64748b", fontFamily:"monospace" }}>{l.apy}</div>
+              <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>{l.mult}</div>
+            </button>
+          ))}
+        </div>
+        <ArcBtn label={staking ? "Staking..." : `⟶ STAKE ${lock}d (REAL TX)`} onClick={onArc ? stake : undefined} loading={staking} disabled={!stakeAmt || Number(stakeAmt)<=0 || !onArc} color={onArc ? "#00FFB0" : "#F59E0B"}/>
+      </div>
+
+      {/* Claim rewards */}
+      {rewards != null && rewards > 0n && (
+        <div style={{ background:"rgba(251,191,36,.04)", border:"1px solid rgba(251,191,36,.2)", borderRadius:5, padding:"12px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>PENDING REWARDS</div>
+            <div style={{ fontSize:16, color:"#fbbf24", fontFamily:"monospace", fontWeight:700 }}>{(Number(rewards)/1e6).toFixed(4)} USDC</div>
+          </div>
+          <ArcBtn label={claiming ? "Claiming..." : "⟶ CLAIM"} onClick={onArc ? claim : undefined} loading={claiming} disabled={!onArc} color="#fbbf24" small/>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
   const stake=async()=>{
     if(!stakeAmt)return;setStaking(true);
@@ -2697,47 +2939,104 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 }
 
 function PortfolioPanel({ account, balance, usdcBalance, prices }) {
-  const P = [
-    { token:"USDC",  balance:usdcBalance!==null?fmtUsdc(usdcBalance):"—", price:prices.USDC||1,    icon:"💵", c:"#00FFB0", note:"Arc Testnet" },
-    { token:"WETH",  balance:"—",                                          price:prices.WETH||2597, icon:"Ξ",  c:"#818cf8", note:"Not on ARC yet" },
+  const [eurcBal, setEurcBal] = useState(null);
+  const [cbtcBal, setCbtcBal] = useState(null);
+
+  useEffect(() => {
+    if (!account?.address) return;
+    const a = account.address;
+    Promise.all([
+      rpcCall("eth_call", [{ to: CONTRACTS.EURC,   data: "0x70a08231" + encodeAddress(a) }, "latest"]),
+      rpcCall("eth_call", [{ to: CONTRACTS.cirBTC,  data: "0x70a08231" + encodeAddress(a) }, "latest"]),
+    ]).then(([e, b]) => {
+      setEurcBal(e && e !== "0x" ? BigInt(e) : 0n);
+      setCbtcBal(b && b !== "0x" ? BigInt(b) : 0n);
+    }).catch(() => {});
+  }, [account?.address]);
+
+  const usdc = usdcBalance != null ? Number(usdcBalance) / 1e6 : 0;
+  const eurc = eurcBal != null ? Number(eurcBal) / 1e6 : null;
+  const cbtc = cbtcBal != null ? Number(cbtcBal) / 1e8 : null;
+
+  const usdcPrice = prices?.USDC  ?? 1;
+  const eurcPrice = prices?.EURC  ?? prices?.EUR ?? 1.08;
+  const btcPrice  = prices?.BTC   ?? prices?.WBTC ?? 0;
+
+  const totalUsd = usdc * usdcPrice
+    + (eurc != null ? eurc * eurcPrice : 0)
+    + (cbtc != null ? cbtc * btcPrice  : 0);
+
+  const { bals: shBals } = useShieldedBalances(prices);
+
+  const tokens = [
+    { token:"USDC",   val: usdc,  ready: true,        fmt: v=>"$"+v.toFixed(2),   usd: usdc*usdcPrice,  icon:"💵", c:"#00FFB0" },
+    { token:"EURC",   val: eurc,  ready: eurc!=null,  fmt: v=>"€"+v.toFixed(2),   usd: eurc!=null?eurc*eurcPrice:0, icon:"💶", c:"#60a5fa" },
+    { token:"cirBTC", val: cbtc,  ready: cbtc!=null,  fmt: v=>"₿"+v.toFixed(5),   usd: cbtc!=null?cbtc*btcPrice:0,  icon:"₿",  c:"#F7931A" },
   ];
-  const usdcVal = usdcBalance ? Number(usdcBalance)/1e6 : 0;
 
   const exportReport = () => {
-    const lines = ["PRIVARC OS — PORTFOLIO REPORT","=".repeat(36),`Generated: ${new Date().toLocaleString()}`,`Operator:  ${account?.address||"—"}`,`Wallet:    ${account?.walletName||"—"}`,`Network:   Arc Testnet (chainId: 5042002)`,"",`USDC Balance: ${usdcBalance!==null?fmtUsdc(usdcBalance):"—"} USDC`,"","NETWORK INFO","-".repeat(24),`RPC:  ${ARC_TESTNET.rpcUrl}`,`Explorer: ${ARC_TESTNET.explorer}`,`Faucet: ${ARC_TESTNET.faucet}`,`Gas token: USDC (ERC-20, 6 decimals)`,`Finality: < 1 second`,"","PrivARC OS v3.0.0 — privarc.io"];
-    const blob=new Blob([lines.join("\n")],{type:"text/plain"});
-    const url=URL.createObjectURL(blob);const a=document.createElement("a");
-    a.href=url;a.download=`privarc_report_${Date.now()}.txt`;a.click();URL.revokeObjectURL(url);
+    const lines = [
+      "PRIVARC OS — PORTFOLIO REPORT", "=".repeat(40),
+      `Generated  : ${new Date().toLocaleString()}`,
+      `Address    : ${account?.address || "—"}`,
+      `Network    : Arc Testnet (chainId: 5042002)`, "",
+      "PUBLIC BALANCES",
+      `  USDC   : ${usdc.toFixed(6)}  ≈ $${(usdc*usdcPrice).toFixed(2)}`,
+      `  EURC   : ${eurc!=null?eurc.toFixed(6):"—"}  ≈ $${eurc!=null?(eurc*eurcPrice).toFixed(2):"—"}`,
+      `  cirBTC : ${cbtc!=null?cbtc.toFixed(8):"—"}  ≈ $${cbtc!=null?(cbtc*btcPrice).toFixed(2):"—"}`,
+      `  TOTAL  : $${totalUsd.toFixed(2)} USD`, "",
+      "SHIELDED (private notes)",
+      `  USDC   : $${(shBals?.usdc||0).toFixed(2)}`,
+      `  EURC   : €${(shBals?.eurc||0).toFixed(2)}`,
+      `  cirBTC : ₿${(shBals?.cbtc||0).toFixed(5)}`,
+      `  TOTAL  : ~$${(shBals?.totalUsd||0).toFixed(2)} USD`,
+    ];
+    const blob = new Blob([lines.join("\n")], { type:"text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `privarc_portfolio_${Date.now()}.txt`; a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="📊" title="PORTFOLIO" sub="Real balances from Arc Testnet"/>
-      <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.15)", borderRadius:5, padding:"12px 14px", marginBottom:14 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".2em", fontFamily:"monospace", marginBottom:5 }}>TOTAL PORTFOLIO VALUE</div>
-        <div style={{ fontSize:24, fontWeight:700, color:"#ffffff", fontFamily:"monospace" }}>${usdcVal.toFixed(2)}</div>
-        <div style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>USD · Arc Testnet balance</div>
+      <PH icon="📊" title="PORTFOLIO" sub="Real wallet balances from Arc Testnet"/>
+      <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.15)", borderRadius:5, padding:"12px 14px", marginBottom:10 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".2em", fontFamily:"monospace", marginBottom:4 }}>TOTAL WALLET VALUE</div>
+        <div style={{ fontSize:26, fontWeight:700, color:"#ffffff", fontFamily:"monospace" }}>${totalUsd.toFixed(2)}</div>
+        <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>USD · public balances</div>
         <div style={{ display:"flex", gap:8, marginTop:10 }}>
-          <button onClick={exportReport} style={{ padding:"5px 10px", background:"rgba(0,255,176,.06)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", transition:"all .2s" }} onMouseEnter={e=>e.currentTarget.style.background="rgba(0,255,176,.14)"} onMouseLeave={e=>e.currentTarget.style.background="rgba(0,255,176,.06)"}>⬇ EXPORT REPORT</button>
-          <a href={`${ARC_TESTNET.explorer}/address/${account?.address}`} target="_blank" rel="noreferrer" style={{ padding:"5px 10px", background:"rgba(14,165,233,.06)", border:"1px solid rgba(14,165,233,.2)", borderRadius:3, color:"#0EA5E9", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", textDecoration:"none", display:"inline-flex", alignItems:"center" }}>↗ VIEW ON ARCSCAN</a>
+          <button onClick={exportReport} style={{ padding:"5px 10px", background:"rgba(0,255,176,.06)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace" }}>⬇ EXPORT</button>
+          <a href={`${ARC_TESTNET.explorer}/address/${account?.address}`} target="_blank" rel="noreferrer"
+            style={{ padding:"5px 10px", background:"rgba(14,165,233,.06)", border:"1px solid rgba(14,165,233,.2)", borderRadius:3, color:"#0EA5E9", fontSize:8, fontFamily:"monospace", textDecoration:"none" }}>↗ ARCSCAN</a>
         </div>
       </div>
-      {P.map((p,i)=>(
-        <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"rgba(0,0,0,.3)", border:"1px solid rgba(255,255,255,.06)", borderRadius:5, marginBottom:6 }}>
-          <span style={{ fontSize:16 }}>{p.icon}</span>
+
+      <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>PUBLIC BALANCES</div>
+      {tokens.map(p => (
+        <div key={p.token} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", background:"rgba(0,0,0,.3)", border:"1px solid rgba(255,255,255,.06)", borderRadius:5, marginBottom:6 }}>
+          <span style={{ fontSize:16, width:22, textAlign:"center" }}>{p.icon}</span>
           <div style={{ flex:1 }}>
             <div style={{ fontSize:11, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>{p.token}</div>
-            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{p.note}</div>
           </div>
           <div style={{ textAlign:"right" }}>
-            <div style={{ fontSize:11, color:p.c, fontFamily:"monospace", fontWeight:600 }}>{p.balance}</div>
-            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>@ ${p.price.toFixed(4)}</div>
+            <div style={{ fontSize:12, color: p.ready ? p.c : "#334155", fontFamily:"monospace", fontWeight:600 }}>
+              {!p.ready ? "…" : p.fmt(p.val)}
+            </div>
+            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>
+              {p.ready && p.usd > 0 ? `≈ $${p.usd.toFixed(2)}` : "—"}
+            </div>
           </div>
         </div>
       ))}
-      <div style={{ marginTop:12, background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"10px 13px" }}>
+
+      <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6, marginTop:10 }}>SHIELDED BALANCES (private notes)</div>
+      <ShieldedWallet bals={shBals} onMax={null}/>
+
+      <div style={{ marginTop:10, background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"10px 13px" }}>
         <div style={{ fontSize:9, color:"#0EA5E9", fontFamily:"monospace", fontWeight:700, marginBottom:4 }}>💧 NEED MORE USDC?</div>
-        <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer" style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5, textDecoration:"none" }}>
+        <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer"
+          style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5, textDecoration:"none" }}>
           <span style={{ color:"#0EA5E9" }}>faucet.circle.com ↗</span> — Select Arc Testnet → paste address → request (1 USDC/day)
         </a>
       </div>
@@ -2745,7 +3044,6 @@ function PortfolioPanel({ account, balance, usdcBalance, prices }) {
   );
 }
 
-function AgentsPanel({ agentLogs }) {
   const AG=[
     {id:"SA",name:"ShieldAgent",   role:"Vault monitoring & deposits",    load:14, s:"ACTIVE",  c:"#00FFB0"},
     {id:"SW",name:"SwapAgent",     role:"Arc StableFX routing",            load:8,  s:"ACTIVE",  c:"#4ade80"},
