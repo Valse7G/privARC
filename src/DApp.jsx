@@ -2983,6 +2983,8 @@ function PortfolioPanel({ account, balance, usdcBalance, prices }) {
   );
 }
 
+
+function AgentsPanel({ agentLogs }) {
   const AG=[
     {id:"SA",name:"ShieldAgent",   role:"Vault monitoring & deposits",    load:14, s:"ACTIVE",  c:"#00FFB0"},
     {id:"SW",name:"SwapAgent",     role:"Arc StableFX routing",            load:8,  s:"ACTIVE",  c:"#4ade80"},
