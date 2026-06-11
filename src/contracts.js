@@ -557,10 +557,10 @@ export function needsApproveBeforeDeposit(tokenAddress) {
 }
 
 // ─── STAKING ─────────────────────────────────────────────────────────────────
-// FIX: lockDays → lockSeconds (Staking.sol expects seconds)
-export function buildStakeCalldata(amount, lockDays) {
-  const lockSeconds = BigInt(lockDays) * 86400n;
-  return SEL.stake + encodeUint256(amount) + encodeUint256(lockSeconds);
+// Staking.sol stake(uint256 amount, uint256 lockDuration) expects lockDuration in SECONDS
+// Valid values: 604800 (7d), 2592000 (30d), 7776000 (90d), 15552000 (180d)
+export function buildStakeCalldata(amount, lockSeconds) {
+  return SEL.stake + encodeUint256(amount) + encodeUint256(BigInt(lockSeconds));
 }
 
 // ─── MERKLE ROOT GETTER ───────────────────────────────────────────────────────

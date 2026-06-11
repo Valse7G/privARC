@@ -2756,33 +2756,73 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 
   useEffect(() => { loadStakingData(); const id = setInterval(loadStakingData, 15000); return () => clearInterval(id); }, [loadStakingData]);
 
-  // Local staking positions (stored when staking tx succeeds)
-  const stakingNotes = JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
-  const totalStakedLocal = stakingNotes.reduce((a, n) => a + Number(n.amount), 0);
-  const unlockable = stakingNotes.filter(n => Date.now() >= n.unlockAt);
-  const locked     = stakingNotes.filter(n => Date.now() <  n.unlockAt);
+  // Local staking positions stored per wallet in localStorage
+  const [stakingNotes, setStakingNotes] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
+    } catch { return []; }
+  });
+
+  // Re-load notes when account changes
+  useEffect(() => {
+    try {
+      const n = JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
+      setStakingNotes(n);
+    } catch {}
+  }, [account?.address]);
+
+  const saveNotes = useCallback((notes) => {
+    try { localStorage.setItem(`privarc_stakes_${account?.address || "x"}`, JSON.stringify(notes)); } catch {}
+    setStakingNotes(notes);
+  }, [account?.address]);
+
+  const totalStakedLocal = stakingNotes.reduce((a, n) => a + Number(n.amount || 0), 0);
 
   const stake = async () => {
     if (!stakeAmt || !onArc) return;
     setStaking(true);
     const amtWei = BigInt(Math.round(Number(stakeAmt) * 1e6));
-    const approveOk = await sendRealTx({ label:"Approve USDC", description:`Approve ${stakeAmt} USDC for Staking`, buildTx: () => ({ to: CONTRACTS.USDC, value: "0x0", data: buildApproveCalldata(CONTRACTS.Staking, amtWei) }) });
+
+    // Arc native USDC (0x3600...) supports ERC-20 interface for approve
+    // Must approve Staking contract to call safeTransferFrom
+    const approveOk = await sendRealTx({
+      label: "Approve USDC",
+      description: `Approve ${stakeAmt} USDC for Staking`,
+      buildTx: () => ({ to: CONTRACTS.USDC, value: "0x0", data: buildApproveCalldata(CONTRACTS.Staking, amtWei) }),
+    });
+
     if (approveOk) {
-      const stakeOk = await sendRealTx({ label:"Stake", description:`Staking ${stakeAmt} USDC (${lock}d lock)`, buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: buildStakeCalldata(amtWei, lk.sec) }) });
+      // Pass lk.sec directly — buildStakeCalldata now takes seconds, not days
+      const stakeOk = await sendRealTx({
+        label: "Stake",
+        description: `Staking ${stakeAmt} USDC (${lock}d lock, ${lk.apy} APY)`,
+        buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: buildStakeCalldata(amtWei, lk.sec) }),
+      });
       if (stakeOk) {
-        const notes = JSON.parse(localStorage.getItem(`privarc_stakes_${account.address}`) || "[]");
-        notes.push({ id: Date.now(), amount: Number(stakeAmt), lockDays: Number(lock), unlockedAt: Date.now() + lk.sec * 1000, stakedAt: Date.now() });
-        localStorage.setItem(`privarc_stakes_${account.address}`, JSON.stringify(notes));
+        const stakeId = Date.now(); // used as on-chain stakeId approximation
+        const updated = [...stakingNotes, {
+          id:         stakeId,
+          amount:     Number(stakeAmt),
+          lockDays:   Number(lock),
+          unlockedAt: Date.now() + lk.sec * 1000,  // ← consistent field name
+          stakedAt:   Date.now(),
+        }];
+        saveNotes(updated);
         loadStakingData();
       }
     }
     setStakeAmt(""); setStaking(false);
   };
 
-  const unstake = async (idx) => {
-    await sendRealTx({ label:"Unstake", description:`Unstaking position #${idx}`, buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: SEL.unstake + encodeUint256(BigInt(idx)) }) });
-    const notes = JSON.parse(localStorage.getItem(`privarc_stakes_${account.address}`) || "[]");
-    localStorage.setItem(`privarc_stakes_${account.address}`, JSON.stringify(notes.filter((_, i) => i !== idx)));
+  const unstake = async (noteIdx, note) => {
+    // unstake(stakeId) — stakeId is the index in the contract's _userStakes array
+    // For simplicity on testnet: we use the array index in our local notes as stakeId
+    await sendRealTx({
+      label: "Unstake",
+      description: `Unstaking ${note.amount.toFixed(2)} USDC`,
+      buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: SEL.unstake + encodeUint256(BigInt(noteIdx)) }),
+    });
+    saveNotes(stakingNotes.filter((_, i) => i !== noteIdx));
     loadStakingData();
   };
 
@@ -2817,19 +2857,19 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
         <div style={{ marginBottom:10 }}>
           <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>YOUR POSITIONS</div>
           {stakingNotes.map((n, i) => {
-            const canUnstake = Date.now() >= n.unlockedAt;
-            const daysLeft = Math.max(0, Math.ceil((n.unlockedAt - Date.now()) / 86400000));
+            const canUnstake = Date.now() >= (n.unlockedAt || n.unlockAt || 0);
+            const daysLeft = Math.max(0, Math.ceil(((n.unlockedAt || n.unlockAt || 0) - Date.now()) / 86400000));
             return (
-              <div key={n.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"rgba(0,0,0,.3)", border:`1px solid rgba(0,255,176,${canUnstake?.2:.08})`, borderRadius:5, marginBottom:5 }}>
+              <div key={n.id || i} style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"rgba(0,0,0,.3)", border:`1px solid rgba(0,255,176,${canUnstake?.2:.08})`, borderRadius:5, marginBottom:5 }}>
                 <div style={{ flex:1 }}>
-                  <span style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>{n.amount.toFixed(2)} USDC</span>
+                  <span style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>{Number(n.amount||0).toFixed(2)} USDC</span>
                   <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginLeft:8 }}>{n.lockDays}d lock</span>
                 </div>
                 <span style={{ fontSize:8, color: canUnstake ? "#00FFB0" : "#64748b", fontFamily:"monospace" }}>
                   {canUnstake ? "✓ Unlocked" : `🔒 ${daysLeft}d left`}
                 </span>
                 {canUnstake && (
-                  <button onClick={() => unstake(i)} style={{ padding:"4px 9px", background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace" }}>
+                  <button onClick={() => unstake(i, n)} style={{ padding:"4px 9px", background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:3, color:"#00FFB0", fontSize:8, cursor:"pointer", fontFamily:"monospace" }}>
                     UNSTAKE
                   </button>
                 )}

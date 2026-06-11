@@ -1,6 +1,6 @@
 {
   "name": "privarc-os",
-  "version": "10.10.0",
+  "version": "10.11.0",
   "private": true,
   "type": "module",
   "scripts": {
