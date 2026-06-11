@@ -1546,7 +1546,8 @@ function useProtocolStats(onArc) {
 // Aggregates localStorage notes per token, returns per-token balances + USD total.
 // Updates whenever notes change (storage event) or component re-renders.
 function useShieldedBalances(prices) {
-  const [bals, setBals] = useState({});
+  const SAFE_BALS = { usdc:0, eurc:0, cbtc:0, totalUsd:0, rawUsdc:0n, rawEurc:0n, rawCbtc:0n, noteCount:0 };
+  const [bals, setBals] = useState(SAFE_BALS);
 
   const compute = useCallback(() => {
     const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
@@ -1560,20 +1561,20 @@ function useShieldedBalances(prices) {
       const match = Object.keys(acc).find(a => a.toLowerCase() === k);
       if (match) acc[match] += BigInt(n.amount || 0);
     }
-    // Convert to display values
-    const usdc  = Number(acc[NATIVE_USDC])      / 1e6;
-    const eurc  = Number(acc[CONTRACTS.EURC])   / 1e6;
-    const cbtc  = Number(acc[CONTRACTS.cirBTC]) / 1e8;
+    // Convert to display values — guard against BigInt overflow or zero-address tokens
+    const usdc  = isFinite(Number(acc[NATIVE_USDC]))      ? Number(acc[NATIVE_USDC])      / 1e6 : 0;
+    const eurc  = isFinite(Number(acc[CONTRACTS.EURC]))   ? Number(acc[CONTRACTS.EURC])   / 1e6 : 0;
+    const cbtc  = isFinite(Number(acc[CONTRACTS.cirBTC])) ? Number(acc[CONTRACTS.cirBTC]) / 1e8 : 0;
 
-    const usdcPrice = 1;                                    // USDC = $1
-    const eurcPrice = prices?.EURC  ?? prices?.EUR ?? 1.08; // ~EUR/USD
+    const usdcPrice = 1;
+    const eurcPrice = prices?.EURC  ?? prices?.EUR ?? 1.08;
     const btcPrice  = prices?.BTC   ?? prices?.WBTC ?? 0;
 
-    const totalUsd = usdc * usdcPrice + eurc * eurcPrice + cbtc * btcPrice;
+    const rawTotal = usdc * usdcPrice + eurc * eurcPrice + cbtc * btcPrice;
+    const totalUsd = isFinite(rawTotal) ? rawTotal : 0;
 
     setBals({
       usdc, eurc, cbtc, totalUsd,
-      // raw BigInt for MAX calculations
       rawUsdc:  acc[NATIVE_USDC],
       rawEurc:  acc[CONTRACTS.EURC],
       rawCbtc:  acc[CONTRACTS.cirBTC],
@@ -1597,7 +1598,14 @@ function useShieldedBalances(prices) {
 // Displays per-token shielded balance + MAX buttons.
 function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
   if (!bals) return null;
-  const { usdc, eurc, cbtc, totalUsd, rawUsdc, rawEurc, rawCbtc, noteCount } = bals;
+  const usdc  = bals.usdc  ?? 0;
+  const eurc  = bals.eurc  ?? 0;
+  const cbtc  = bals.cbtc  ?? 0;
+  const rawUsdc = bals.rawUsdc  ?? 0n;
+  const rawEurc = bals.rawEurc  ?? 0n;
+  const rawCbtc = bals.rawCbtc  ?? 0n;
+  const totalUsd = bals.totalUsd ?? 0;
+  const noteCount = bals.noteCount ?? 0;
 
   const tokens = [
     { sym: "USDC",   val: usdc,  raw: rawUsdc,  dec: 6, fmt: v => "$" + v.toFixed(2),   color: "#00FFB0" },
@@ -2941,16 +2949,16 @@ function PortfolioPanel({ account, balance, usdcBalance, prices }) {
   const eurcPrice = prices?.EURC  ?? prices?.EUR ?? 1.08;
   const btcPrice  = prices?.BTC   ?? prices?.WBTC ?? 0;
 
-  const totalUsd = usdc * usdcPrice
-    + (eurc != null ? eurc * eurcPrice : 0)
-    + (cbtc != null ? cbtc * btcPrice  : 0);
+  const totalUsd = Math.max(0, (usdc * usdcPrice)
+    + (eurc != null && isFinite(eurc) ? eurc * eurcPrice : 0)
+    + (cbtc != null && isFinite(cbtc) ? cbtc * btcPrice  : 0));
 
   const { bals: shBals } = useShieldedBalances(prices);
 
   const tokens = [
-    { token:"USDC",   val: usdc,  ready: true,        fmt: v=>"$"+v.toFixed(2),   usd: usdc*usdcPrice,  icon:"💵", c:"#00FFB0" },
-    { token:"EURC",   val: eurc,  ready: eurc!=null,  fmt: v=>"€"+v.toFixed(2),   usd: eurc!=null?eurc*eurcPrice:0, icon:"💶", c:"#60a5fa" },
-    { token:"cirBTC", val: cbtc,  ready: cbtc!=null,  fmt: v=>"₿"+v.toFixed(5),   usd: cbtc!=null?cbtc*btcPrice:0,  icon:"₿",  c:"#F7931A" },
+    { token:"USDC",   val: usdc,  ready: true,        fmt: v=>"$"+(v??0).toFixed(2),   usd: (usdc??0)*usdcPrice,  icon:"💵", c:"#00FFB0" },
+    { token:"EURC",   val: eurc,  ready: eurc!=null,  fmt: v=>"€"+(v??0).toFixed(2),   usd: eurc!=null&&isFinite(eurc)?eurc*eurcPrice:0, icon:"💶", c:"#60a5fa" },
+    { token:"cirBTC", val: cbtc,  ready: cbtc!=null,  fmt: v=>"₿"+(v??0).toFixed(5),   usd: cbtc!=null&&isFinite(cbtc)?cbtc*btcPrice:0,  icon:"₿",  c:"#F7931A" },
   ];
 
   const exportReport = () => {
