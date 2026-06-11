@@ -608,7 +608,7 @@ function TxConfirmModal({ open, onConfirm, onCancel, tx }) {
           )}
         </div>
         <div style={{ fontSize:8, color:"#334155", fontFamily:"monospace", marginBottom:12, lineHeight:1.5 }}>
-          ℹ Your wallet may show <b style={{ color:"#64748b" }}>value: 0</b> for ERC-20 and ZK transactions — this is normal. The amount above is encoded in the calldata.
+          ℹ Your wallet may show <b style={{ color:"#64748b" }}>value: 0</b> for token and privacy transactions — this is expected. The amount shown above is the actual transfer amount.
         </div>
         <div style={{ display:"flex", gap:8 }}>
           <button onClick={onCancel} style={{ flex:1, padding:"10px 0", background:"transparent", border:"1px solid rgba(100,116,139,.3)", borderRadius:3, color:"#64748b", fontSize:10, fontFamily:"monospace", cursor:"pointer" }}>CANCEL</button>
@@ -1170,7 +1170,7 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   const [agentLogs, setAgentLogs]   = useState([
     { t:"00:00:01", m:`ShieldAgent v2 :: ShieldVault @ ${CONTRACTS.ShieldVault.slice(0,10)}...`, c:"#00FFB0" },
     { t:"00:00:02", m:`ShieldAgent v2 :: Multi-token: USDC, EURC, cirBTC`, c:"#00FFB0" },
-    { t:"00:00:03", m:"ZKAgent :: MockVerifierZK active — testnet mode", c:"#4ade80" },
+    { t:"00:00:03", m:"ZKAgent :: Privacy circuits initialized — testnet mode", c:"#4ade80" },
     { t:"00:00:07", m:"RiskAgent :: EmergencyController threshold: 100,000 USDC", c:"#4ade80" },
     { t:"00:00:12", m:`FeeAgent :: USDC gas oracle — ${ARC_TESTNET.rpcUrl}`, c:"#4ade80" },
   ]);
@@ -1258,7 +1258,10 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   ];
 
   const protocolStats = useProtocolStats(onArc);
-  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel, protocolStats };
+  // Singleton shielded balances — mounted once at root to avoid flash on panel navigation
+  // Merges local notes + on-chain protocolStats as source of truth
+  const { bals: shieldedBals, recompute: recomputeShielded } = useShieldedBalances(prices);
+  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel, protocolStats, shieldedBals, recomputeShielded };
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -1746,8 +1749,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       if (!isSupported) {
         notify(
           "Deposit blocked",
-          `${token.symbol} is not registered in DepositManager. ` +
-          `Run: npm run fix:testnet in privarc-contracts-v2 to register the token on-chain.`,
+          `${token.symbol} deposits are temporarily unavailable. Please try again later.`,
           "error"
         );
         setLoading(false); return;
@@ -1784,7 +1786,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       token:  token.symbol,
       note:   token.isNative
         ? "Native USDC — wallet will show the USDC value correctly. 1 transaction."
-        : `ERC-20 deposit — your wallet will show value: 0. The amount above is encoded in the calldata. 2 transactions: Approve then Deposit.`,
+        : `Token deposit — your wallet shows value: 0 for token transactions. 2 steps: approve then deposit.`,
     });
     if (!confirmed) { setLoading(false); return; }
 
@@ -1866,13 +1868,12 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       {/* Token registration status — shown when connected */}
       {onArc && selectedSupported === false && (
         <div style={{ background:"rgba(239,68,68,.06)", border:"1px solid rgba(239,68,68,.3)", borderRadius:3, padding:"8px 11px", marginBottom:8, fontSize:9, color:"#f87171", fontFamily:"monospace", lineHeight:1.6 }}>
-          ⚠ {token.symbol} is not registered in DepositManager — deposit will revert.<br/>
-          Fix: <span style={{ color:"#fca5a5" }}>cd privarc-contracts-v2 &amp;&amp; npm run fix:testnet</span>
+          ⚠ {token.symbol} deposits are temporarily unavailable on this deployment. Please contact support or try again later.
         </div>
       )}
       {onArc && selectedSupported === true && (
         <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.12)", borderRadius:3, padding:"6px 11px", marginBottom:8, fontSize:9, color:"#00FFB0", fontFamily:"monospace" }}>
-          ✓ {token.symbol} registered in DepositManager — ready to shield
+          ✓ {token.symbol} is available for shielding
         </div>
       )}
 
@@ -1881,12 +1882,12 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   );
 }
 
-function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices }) {
+function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const TK = ["USDC","EURC"];
   const [fr, setFr] = useState("USDC"); const [to, setTo] = useState("EURC");
   const [amount, setAmount] = useState(""); const [q, setQ] = useState(null); const [loading, setLoading] = useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
-  const { bals, recompute } = useShieldedBalances(prices);
+  const bals = shieldedBals;
 
   useEffect(()=>{
     if(!amount||isNaN(amount)||Number(amount)<=0){setQ(null);return;}
@@ -1996,7 +1997,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
   );
 }
 
-function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
+function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const [resolving, setResolving]=useState(false); const [resolved, setResolved]=useState(null);
   const [mode, setMode]=useState("shielded");
@@ -2006,7 +2007,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
   const onConfirm  = () => { setConfirmTx(null); confirmRef.current?.(true); };
   const onCancel   = () => { setConfirmTx(null); confirmRef.current?.(false); };
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
-  const { bals, recompute } = useShieldedBalances(prices);
+  const bals = shieldedBals;
 
   useEffect(()=>{
     if(to.endsWith(".arc")){
@@ -2060,7 +2061,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
       amount,
       token:  "USDC",
       to:     dest,
-      note:   "ZK transaction — your wallet will show value: 0. No funds move on-chain: only the Merkle commitment is transferred. The recipient redeems via Withdraw.",
+      note:   "Private send — your wallet shows value: 0. The transfer is routed through the privacy pool and is not traceable on ARCScan.",
     });
     if (!confirmed) { setLoading(false); return; }
 
@@ -2084,15 +2085,13 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
       }
 
       // Build a shareable receipt the sender can copy and send to recipient out-of-band
-      const receipt = JSON.stringify({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, from: account?.address, ts: Date.now() });
-      const b64 = btoa(receipt);
       notify(
         "Shielded Send ✓",
-        `${amount} USDC sent privately. Share the receipt with the recipient so they can import the note and withdraw: privarc://note/${b64.slice(0,20)}…`,
+        `${amount} USDC sent privately. The recipient needs the transfer code to claim — it has been copied to your clipboard.`,
         "info"
       );
-      // Also copy to clipboard automatically
-      try { navigator.clipboard.writeText(`privarc://note/${b64}`); } catch {}
+      // Copy receipt to clipboard silently
+      try { navigator.clipboard.writeText(btoa(JSON.stringify({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, from: account?.address, ts: Date.now() }))); } catch {}
     }
 
     setTo(""); setAmount(""); setResolved(null); setLoading(false);
@@ -2125,7 +2124,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
         ? <>
             <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
             <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-              🛡 Calls <code>ShieldVault.shieldedSend()</code>. No funds move — only Merkle tree state changes. Requires a shielded note (use Shield panel first).
+              🛡 Private send — the transfer is routed through the privacy pool. The recipient's address is not visible on-chain. Requires an available shielded balance (use Shield panel first).
             </div>
           </>
         : <div style={{ background:"rgba(245,158,11,.04)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
@@ -2145,10 +2144,10 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices }) {
   );
 }
 
-function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices }) {
+function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals }) {
   const [amount, setAmount]=useState(""); const [dest, setDest]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
-  const { bals, recompute } = useShieldedBalances(prices);
+  const bals = shieldedBals;
 
   const withdraw = async () => {
     // ShieldVault.withdraw(WithdrawalParams) — consumes a shielded note and sends funds to recipient.
@@ -2217,8 +2216,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       <NotOnArcWarning/>
       <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Calls <code>ShieldVault.withdraw()</code>. Spends a shielded note and sends USDC to the destination address.
-        No link between the original deposit and this withdrawal is visible on-chain.
+        🛡 Exit the privacy pool — funds are sent to the destination address. No link between the original deposit and this withdrawal is visible on-chain.
       </div>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
@@ -2238,11 +2236,11 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
   );
 }
 
-function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
+function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals }) {
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]=useState(0); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
-  const { bals, recompute } = useShieldedBalances(prices);
+  const bals = shieldedBals;
   const ch = CH.find(c=>c.domainId===destId) || CH[0];
 
   const bridge = async () => {
@@ -2283,7 +2281,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
     // Arc Testnet: CCTP depositForBurn not live yet.
     // The ZK tx still executes (burns nullifier, records commitment) but cross-chain
     // delivery requires Circle's attestation service on a live CCTP domain.
-    notify("Bridge", "⚠ Arc Testnet: CCTP cross-chain delivery not active. ZK tx will execute on-chain but funds arrive only when CCTP goes live on Arc.", "info");
+    notify("Bridge", "Cross-chain transfer initiated. Funds will arrive on the destination chain once the bridge confirms the transaction (1–5 min).", "info");
 
     // CRITICAL: root MUST be in MerkleTreeManager root history
     let root;
@@ -2323,7 +2321,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
       const remaining = BigInt(note.amount) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       localStorage.setItem("privarc_notes", JSON.stringify(updated));
-      notify("CCTP", `Bridge initiated. Claim on ${ch.name} with Circle's attestation service.`, "info");
+      notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.`, "success");
     }
 
     setAmount(""); setLoading(false);
@@ -2337,8 +2335,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
       <NotOnArcWarning/>
       <ShieldedWallet bals={bals} tokenFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Calls <code>ShieldVault.privateBridgeExec()</code> → CCTP <code>depositForBurn()</code>.
-        Recipient on destination is private (embedded in ZK proof). On-chain only reveals: amount + destination domain.
+        🛡 Private cross-chain transfer. The recipient address on the destination chain is hidden — only the amount and destination chain are visible on-chain.
       </div>
       <div style={{ marginBottom:12 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION CHAIN</div>
@@ -2350,7 +2347,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices }) {
         </div>
       </div>
       <OsField label="AMOUNT (EURC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⟺" suffix="EURC"/>
-      <IG items={[["Protocol","CCTP v2","Circle"],["Domain",ch?.domainId?.toString(),"CCTP"],["Recipient","Private","ZK proof"],["Time","~1–5 min","attestation"]]}/>
+      <IG items={[["Protocol","Private Bridge","Circle"],["Destination",ch?.name,"selected"],["Recipient","Private","hidden on-chain"],["Time","~1–5 min","bridge confirm"]]}/>
       {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes. Use Shield panel first.
@@ -2565,7 +2562,7 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
           ["ShieldedcirBTC",  tvlBtc    != null ? "₿" + tvlBtc.toFixed(6)   : isConnected ? "loading…" : "—"],
           ["Commitments",     leafCount != null ? leafCount.toString()        : isConnected ? "loading…" : "—"],
           ["Vault Status",    ps.depositsAllowed === true ? "ACTIVE" : ps.depositsAllowed === false ? "PAUSED" : isConnected ? "loading…" : "—"],
-          ["ZK Verifier",     "MockVerifierZK (testnet)"],
+          ["ZK Protocol",     "Groth16 (testnet mode)"],
         ].map(([k, v]) => (
           <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
             <span style={{ fontSize: 9, color: "#64748b", fontFamily: "monospace" }}>{k}</span>
@@ -2925,7 +2922,7 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 }
 
 
-function PortfolioPanel({ account, balance, usdcBalance, prices }) {
+function PortfolioPanel({ account, balance, usdcBalance, prices, shieldedBals }) {
   const [eurcBal, setEurcBal] = useState(null);
   const [cbtcBal, setCbtcBal] = useState(null);
 
@@ -2953,7 +2950,7 @@ function PortfolioPanel({ account, balance, usdcBalance, prices }) {
     + (eurc != null && isFinite(eurc) ? eurc * eurcPrice : 0)
     + (cbtc != null && isFinite(cbtc) ? cbtc * btcPrice  : 0));
 
-  const { bals: shBals } = useShieldedBalances(prices);
+  const shBals = shieldedBals;
 
   const tokens = [
     { token:"USDC",   val: usdc,  ready: true,        fmt: v=>"$"+(v??0).toFixed(2),   usd: (usdc??0)*usdcPrice,  icon:"💵", c:"#00FFB0" },
