@@ -1159,8 +1159,8 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   const { notifs } = useNotif();
   const [panel, setPanel]           = useState("overview");
   const [txHistory, setTxHistory]   = useState(() => {
-    // Load persisted tx history for the connected wallet (keyed by address after connect)
-    try { return JSON.parse(localStorage.getItem("privarc_txhistory_global") || "[]"); } catch { return []; }
+    // Loaded per wallet after connect — starts empty, populated in notify()
+    return [];
   });
   const [tx, setTx]                 = useState(null);
   const [blockNum, setBlockNum]     = useState(null);
@@ -1223,8 +1223,11 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     if (status==="success"&&hash) {
       const entry = { hash, label, ts:tc(), status:"success", amount: amount || "—" };
       setTxHistory(p => {
-        const updated = [entry, ...p.slice(0, 49)]; // keep 50 entries
-        try { localStorage.setItem("privarc_txhistory_global", JSON.stringify(updated)); } catch {}
+        const updated = [entry, ...p.slice(0, 49)];
+        if (account?.address) {
+          const key = `privarc_txhistory_${account.address.toLowerCase()}`;
+          try { localStorage.setItem(key, JSON.stringify(updated)); } catch {}
+        }
         return updated;
       });
       push(`${label}: ${message}`, "success", `${ARC_TESTNET.explorer}/tx/${hash}`);
@@ -1258,9 +1261,35 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   ];
 
   const protocolStats = useProtocolStats(onArc);
-  // Singleton shielded balances — mounted once at root to avoid flash on panel navigation
-  // Merges local notes + on-chain protocolStats as source of truth
-  const { bals: shieldedBals, recompute: recomputeShielded } = useShieldedBalances(prices);
+
+  // Load wallet-scoped tx history when account connects
+  useEffect(() => {
+    if (!account?.address) { setTxHistory([]); return; }
+    const key = `privarc_txhistory_${account.address.toLowerCase()}`;
+    try { setTxHistory(JSON.parse(localStorage.getItem(key) || "[]")); } catch { setTxHistory([]); }
+  }, [account?.address]);
+
+  // Migrate legacy notes (from global "privarc_notes" key → wallet-scoped) on first connect
+  useEffect(() => {
+    if (!account?.address) return;
+    const legacyKey = "privarc_notes";
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy) {
+      try {
+        const old = JSON.parse(legacy);
+        if (Array.isArray(old) && old.length > 0) {
+          const current = getNotes(account.address);
+          const existingSet = new Set(current.map(n => n.commitment));
+          const merged = [...current, ...old.filter(n => !existingSet.has(n.commitment))];
+          saveNotes(account.address, merged);
+          localStorage.removeItem(legacyKey);
+          console.log(`[PrivARC] Migrated ${old.length} legacy notes → ${notesKey(account.address)}`);
+        }
+      } catch {}
+    }
+  }, [account?.address]);
+
+  const { bals: shieldedBals, recompute: recomputeShielded } = useShieldedBalances(prices, account?.address);
   const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel, protocolStats, shieldedBals, recomputeShielded };
 
   return (
@@ -1548,12 +1577,85 @@ function useProtocolStats(onArc) {
 // ── Shielded balances hook ────────────────────────────────────────────────────
 // Aggregates localStorage notes per token, returns per-token balances + USD total.
 // Updates whenever notes change (storage event) or component re-renders.
-function useShieldedBalances(prices) {
+// ═══════════════════════════════════════════════════════════════
+//  SHIELDED NOTES — wallet-scoped, on-chain reconciled
+// ═══════════════════════════════════════════════════════════════
+
+// Key scoped per wallet address — prevents cross-account data leakage
+const notesKey  = (addr) => addr ? `privarc_notes_${addr.toLowerCase()}` : "privarc_notes_anon";
+const getNotes  = (addr) => { try { return JSON.parse(localStorage.getItem(notesKey(addr)) || "[]"); } catch { return []; } };
+const saveNotes = (addr, notes) => { try { localStorage.setItem(notesKey(addr), JSON.stringify(notes)); } catch {} };
+
+// Event topic0 hashes (keccak256 of event signature)
+const EV = {
+  Deposited:                "0xe758dd586554a30e85101e8e9ab611091d9230b7233f0f6a9736488e55d9d9e7",
+  Withdrawn:                "0xa6786aab7dbbc48b4b0387488b407bd81448030ab207b50bea7dbb5fbc1cd9eb",
+  SwapExecuted:             "0x2f4c76c8d18f45069b0941499205a7fceaaa3caf9e2e6328f6a544cd339120f3",
+  BridgeInitiated:          "0xaba39d71efa30c57b34ac80bfd1c5a6ad2a46bb6887c1bdb8d8500410c59b5ab",
+  ShieldedTransferProcessed:"0x6a0c61ef664f8d0c17a5bee04becc9ed40374fc0f473a7bf7f3cce66d1bd2b7d",
+};
+
+// Reconcile local notes with on-chain events for the connected wallet
+// Deposits are public (commitment + token + amount emitted on-chain)
+// We add any deposit we don't already have in local notes
+async function reconcileNotesOnChain(address) {
+  if (!address) return;
+  try {
+    const blockHex = await rpcCall("eth_blockNumber", []);
+    const current  = parseInt(blockHex, 16);
+    const from     = "0x" + Math.max(0, current - 5_000_000).toString(16); // look back up to ~5M blocks
+
+    // Fetch Deposited events from ShieldVault
+    const logs = await rpcCall("eth_getLogs", [{
+      fromBlock: from,
+      toBlock:   "latest",
+      address:   CONTRACTS.ShieldVault,
+      topics:    [EV.Deposited],
+    }]);
+    if (!Array.isArray(logs) || logs.length === 0) return;
+
+    const existing = getNotes(address);
+    const existingSet = new Set(existing.map(n => n.commitment));
+
+    let added = 0;
+    for (const log of logs) {
+      try {
+        // Deposited(bytes32 indexed commitment, address indexed token, uint256 amount, uint256 leafIndex, bytes32 merkleRoot)
+        // topics[1] = commitment (indexed), topics[2] = token (indexed)
+        // data = abi.encode(amount, leafIndex, merkleRoot)
+        const commitment = log.topics?.[1];
+        const token      = log.topics?.[2] ? "0x" + log.topics[2].slice(26) : null;
+        const data       = log.data?.replace("0x", "") || "";
+        if (!commitment || !token || data.length < 192) continue;
+
+        const amount = BigInt("0x" + data.slice(0, 64));
+        const ts     = Date.now(); // approximate; block timestamp not in log here
+
+        // Only add if not already tracked
+        if (!existingSet.has(commitment)) {
+          existing.push({ commitment, amount: amount.toString(), token, ts, source: "onchain" });
+          existingSet.add(commitment);
+          added++;
+        }
+      } catch {}
+    }
+
+    if (added > 0) {
+      saveNotes(address, existing);
+      console.log(`[PrivARC] Reconciled ${added} on-chain deposit(s) for ${address.slice(0,8)}…`);
+    }
+  } catch (e) {
+    console.warn("[PrivARC] On-chain reconciliation failed:", e.message);
+  }
+}
+
+function useShieldedBalances(prices, address) {
   const SAFE_BALS = { usdc:0, eurc:0, cbtc:0, totalUsd:0, rawUsdc:0n, rawEurc:0n, rawCbtc:0n, noteCount:0 };
   const [bals, setBals] = useState(SAFE_BALS);
 
   const compute = useCallback(() => {
-    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    // Wallet-scoped notes — address-keyed to prevent cross-account leakage
+    const notes = getNotes(address);
     const acc = {
       [NATIVE_USDC]:        0n,
       [CONTRACTS.EURC]:     0n,
@@ -1583,15 +1685,18 @@ function useShieldedBalances(prices) {
       rawCbtc:  acc[CONTRACTS.cirBTC],
       noteCount: notes.length,
     });
-  }, [prices]);
+  }, [prices, address]);
 
   useEffect(() => {
     compute();
-    // Re-compute when other tabs write to localStorage
-    const handler = (e) => { if (e.key === "privarc_notes") compute(); };
+    // Listen for cross-tab writes (uses wallet-scoped key)
+    const key = notesKey(address);
+    const handler = (e) => { if (e.key === key || e.key === "privarc_notes") compute(); };
     window.addEventListener("storage", handler);
+    // On-chain reconciliation on mount (adds any missed deposits)
+    if (address) reconcileNotesOnChain(address).then(compute).catch(() => {});
     return () => window.removeEventListener("storage", handler);
-  }, [compute]);
+  }, [compute, address]);
 
   return { bals, recompute: compute };
 }
@@ -1799,9 +1904,9 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     if (ok) {
       // Store note locally (in production: persist to encrypted local storage)
       const note = { commitment, amount: amountBig.toString(), token: token.address, ts: Date.now() };
-      const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+      const notes = getNotes(account?.address);
       notes.push(note);
-      localStorage.setItem("privarc_notes", JSON.stringify(notes));
+      saveNotes(account?.address, notes);
       notify("Shield ✓", `${amount} ${token.symbol} shielded — note saved in browser storage.`, "success");
     }
 
@@ -1904,7 +2009,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
     if (!amount || !q || !onArc) return;
     setLoading(true);
 
-    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    const notes = getNotes(account?.address);
     const tokenInAddr = fr === "USDC" ? NATIVE_USDC : null;
     const tokenOutAddr = to === "EURC" ? CONTRACTS.EURC : (to === "USDC" ? NATIVE_USDC : null);
 
@@ -1970,7 +2075,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       // Output note in tokenOut
       const outAmount = BigInt(Math.round(Number(q.out) * 1e6));
       updated.push({ commitment: commitmentOut, amount: outAmount.toString(), token: tokenOutAddr, ts: Date.now() });
-      localStorage.setItem("privarc_notes", JSON.stringify(updated));
+      saveNotes(account?.address, updated);
       notify("Note saved", `Swap output note (${q.out} ${to}) stored locally.`, "info");
     }
 
@@ -2028,7 +2133,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     setLoading(true);
 
     // Check for existing shielded note
-    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
     const note = notes.find(n => BigInt(n.amount) >= amountBig);
     if (!note) {
@@ -2077,7 +2182,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       // Store output note for sender (they can redeem on behalf if needed)
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
-      localStorage.setItem("privarc_notes", JSON.stringify(updated));
+      saveNotes(account?.address, updated);
 
       // Auto-credit: if recipient is the SAME connected wallet, add note immediately
       if (dest.toLowerCase() === account?.address?.toLowerCase?.()) {
@@ -2160,7 +2265,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
     }
     setLoading(true);
 
-    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
     const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === NATIVE_USDC.toLowerCase());
     if (!note) {
@@ -2204,7 +2309,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(note.amount) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
-      localStorage.setItem("privarc_notes", JSON.stringify(updated));
+      saveNotes(account?.address, updated);
     }
 
     setAmount(""); setDest(""); setLoading(false);
@@ -2270,7 +2375,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       setLoading(false); return;
     }
 
-    const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
+    const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
     const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === EURC.toLowerCase());
     if (!note) {
@@ -2320,14 +2425,12 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(note.amount) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
-      localStorage.setItem("privarc_notes", JSON.stringify(updated));
+      saveNotes(account?.address, updated);
       notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.`, "success");
     }
 
     setAmount(""); setLoading(false);
   };
-
-  const notes = JSON.parse(localStorage.getItem("privarc_notes") || "[]");
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
