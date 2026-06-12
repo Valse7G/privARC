@@ -214,7 +214,7 @@ export function Landing({ navigate }) {
 
         {/* Subheadline */}
         <p style={{ fontSize: "clamp(13px,1.8vw,18px)", color: "#94a3b8", maxWidth: 620, lineHeight: 1.7, marginBottom: 44, animation: "fadeUp .7s .2s ease both" }}>
-          The first private on-chain capital management system powered by 8 AI agents on ARC Network. Shield, swap, send and bridge USDC — completely untraceable.
+          The first confidential on-chain capital management system built on ARC Network. Shield, swap, send and bridge USDC with governed visibility — only you control who sees what.
         </p>
 
         {/* CTAs */}
@@ -296,7 +296,7 @@ export function Landing({ navigate }) {
             <div style={{ textAlign: "center", marginBottom: 64 }}>
               <div style={{ fontSize: 9, color: "#4a7c5f", letterSpacing: ".25em", marginBottom: 12, textTransform: "uppercase" }}>▸ Core Features</div>
               <h2 style={{ fontSize: "clamp(28px,4vw,52px)", fontFamily: "'Syne', sans-serif", fontWeight: 800, color: "#ffffff", lineHeight: 1.1 }}>
-                Everything private.<br /><span style={{ color: "#00FFB0" }}>Everything on-chain.</span>
+                Everything shielded.<br /><span style={{ color: "#00FFB0" }}>Governed visibility.</span>
               </h2>
             </div>
           </Reveal>
@@ -305,13 +305,13 @@ export function Landing({ navigate }) {
             {[
               {
                 icon: "🛡", title: "Shield Assets",
-                desc: "Deposit USDC into the ShieldVault. ZK commitments are generated and inscribed on-chain — your balance becomes completely untraceable.",
-                tag: "ZK-Proof",
+                desc: "Deposit USDC into the ShieldVault. Your balance enters a confidential state — only you and parties you authorize can view it. Aligned with Arc Privacy Sector.",
+                tag: "Confidential",
               },
               {
                 icon: "⇄", title: "Private Swap",
-                desc: "Exchange tokens without revealing amounts or addresses. Routes through the ZK relay layer — amounts invisible on-chain, slippage protected.",
-                tag: "ZK-Routed",
+                desc: "Exchange tokens with governed visibility. Amounts and addresses are confidential — accessible only to authorized parties.",
+                tag: "Shielded",
               },
               {
                 icon: "↗", title: "Private Send",
@@ -320,12 +320,12 @@ export function Landing({ navigate }) {
               },
               {
                 icon: "↙", title: "Private Withdraw",
-                desc: "Exit shielded funds to any public address. Groth16 ZK ownership proof generated client-side (~1.8s) before transaction submission.",
+                desc: "Exit confidential balance to any public address. Ownership is proven on-chain — only authorized parties can link deposit and withdrawal.",
                 tag: "Groth16",
               },
               {
                 icon: "⟺", title: "Cross-Chain Bridge",
-                desc: "Bridge shielded USDC across 6 chains via Circle CCTP v2. Funds travel end-to-end shielded — recipient hidden in the ZK proof.",
+                desc: "Bridge shielded USDC across 6 chains via Circle CCTP v2. Recipient address has governed visibility — public on-chain data reveals only amount and destination chain.",
                 tag: "CCTP v2",
               },
               {
@@ -404,7 +404,7 @@ export function Landing({ navigate }) {
           {/* Security badges */}
           <Reveal delay={200}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 28, justifyContent: "center" }}>
-              {["23 Attack Vectors Covered", "CEI Pattern Enforced", "Groth16 BN254 ZK", "CCTP v2 Bridge", "Least Privilege", "NonReentrant Guards", "48h Timelock", "Auto Circuit Breaker"].map(badge => (
+              {["Arc Privacy Sector Aligned", "Governed Visibility", "CEI Pattern Enforced", "CCTP v2 Bridge", "Least Privilege", "NonReentrant Guards", "48h Timelock", "Auto Circuit Breaker"].map(badge => (
                 <span key={badge} style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", background: "rgba(0,255,176,.06)", border: "1px solid rgba(0,255,176,.15)", borderRadius: 3, padding: "5px 10px", color: "#00FFB0" }}>{badge}</span>
               ))}
             </div>
@@ -421,7 +421,7 @@ export function Landing({ navigate }) {
             <div style={{ textAlign: "center", marginBottom: 60 }}>
               <div style={{ fontSize: 9, color: "#4a7c5f", letterSpacing: ".25em", marginBottom: 12, textTransform: "uppercase" }}>▸ How It Works</div>
               <h2 style={{ fontSize: "clamp(26px,4vw,48px)", fontFamily: "'Syne', sans-serif", fontWeight: 800, color: "#ffffff" }}>
-                Connect. Shield. <span style={{ color: "#00FFB0" }}>Operate privately.</span>
+                Connect. Shield. <span style={{ color: "#00FFB0" }}>Governed visibility.</span>
               </h2>
             </div>
           </Reveal>
@@ -429,8 +429,8 @@ export function Landing({ navigate }) {
           {[
             { step: "01", title: "Connect your wallet", desc: "Sign in with MetaMask, Rabby, WalletConnect or 5 other providers. EIP-191 signature authentication — no email, no password. Arc Testnet auto-switch included.", icon: "🔗" },
             { step: "02", title: "Get testnet USDC", desc: "Visit faucet.circle.com, select Arc Testnet, paste your address and request 1 USDC/day. USDC is the native gas token on Arc — no ETH needed.", icon: "💧" },
-            { step: "03", title: "Shield your assets", desc: "Deposit USDC into the ShieldVault. A Groth16 ZK commitment is generated and stored in an on-chain Merkle tree. Your balance is now private.", icon: "🛡" },
-            { step: "04", title: "Operate privately", desc: "Swap tokens, send to any address, bridge across 6 chains — all without exposing amounts or participants. 8 AI agents protect your capital 24/7.", icon: "⚡" },
+            { step: "03", title: "Shield your assets", desc: "Deposit USDC into the ShieldVault. Your balance enters a confidential state with governed visibility — you control who can view your activity.", icon: "🛡" },
+            { step: "04", title: "Operate privately", desc: "Swap tokens, send to any address, bridge across 6 chains — all within a confidential environment with governed visibility. 8 AI agents protect your capital 24/7.", icon: "⚡" },
           ].map((s, i) => (
             <Reveal key={s.step} delay={i * 80}>
               <div style={{ display: "flex", gap: 24, marginBottom: 36, alignItems: "flex-start" }}>
@@ -464,10 +464,10 @@ export function Landing({ navigate }) {
           </Reveal>
 
           {[
-            { q: "Q3 2026", label: "CURRENT", color: "#00FFB0", items: ["Arc Testnet deployment", "ShieldVault v1.0 live", "ZK proof generation (Groth16)", "8 AI agents operational", "USDC Shield / Swap / Send / Bridge", "Governance + Staking live"] },
-            { q: "Q4 2026", label: "NEXT",    color: "#0EA5E9", items: ["Trusted setup ceremony (ZK keys)", "Independent security audit x2", "ZK circuit audit (Veridise)", "Admin multisig deployment", "Bug bounty program (Immunefi)", "Arc Mainnet soft launch"] },
-            { q: "Q1 2027", label: "PLANNED", color: "#a78bfa", items: ["veARC governance token launch", "CCTP v2 mainnet bridge activation", "Full DEX integration (Arc StableFX)", "Mobile app (iOS + Android)", "SDK for third-party integrations", "DAO transition"] },
-            { q: "Q2 2027", label: "FUTURE",  color: "#fbbf24", items: ["Layer 2 scaling", "Cross-chain ZK messaging", "Institutional shield pools", "ZK identity module", "Privacy-preserving DeFi aggregator", "Global expansion"] },
+            { q: "Q3 2026", label: "CURRENT", color: "#00FFB0", items: ["Arc Testnet deployment", "ShieldVault v2.3.0 live", "Confidential Shield / Swap / Send / Bridge", "8 AI agents operational", "Governed visibility (user-scoped notes)", "Governance + Staking live"] },
+            { q: "Q4 2026", label: "NEXT",    color: "#0EA5E9", items: ["EIP-712 authorized view keys (Arc whitepaper §3)", "Independent security audit x2", "ZK circuit audit (Veridise)", "Admin multisig deployment", "Bug bounty program (Immunefi)", "Arc Mainnet soft launch"] },
+            { q: "Q1 2027", label: "PLANNED", color: "#a78bfa", items: ["Arc Private EVM integration (synchronous execution)", "Governed visibility API — compliance & audit mode", "veARC governance token launch", "CCTP v2 mainnet bridge activation", "Full DEX integration (Arc StableFX)", "Mobile app (iOS + Android)"] },
+            { q: "Q2 2027", label: "FUTURE",  color: "#fbbf24", items: ["Hardware enclave execution (Arc Privacy Sector)", "Institutional shield pools with audit access", "Post-quantum encryption layer", "Privacy-preserving DeFi aggregator", "SDK for third-party confidential apps", "DAO transition"] },
           ].map((phase, i) => (
             <Reveal key={phase.q} delay={i * 80}>
               <div style={{ display: "flex", gap: 20, marginBottom: 32 }}>

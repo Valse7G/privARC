@@ -737,8 +737,8 @@ function NotifCenter({ onClose }) {
 const SIDX = [
   { label:"Overview",          panel:"overview",   icon:"◈",  desc:"Dashboard home" },
   { label:"Shield Assets",     panel:"shield",     icon:"🛡", desc:"Deposit USDC into ShieldVault" },
-  { label:"Private Swap",      panel:"swap",       icon:"⇄",  desc:"ZK-routed token exchange" },
-  { label:"Private Send",      panel:"send",       icon:"↗",  desc:"Stealth transfer" },
+  { label:"Confidential Swap", panel:"swap",       icon:"⇄",  desc:"Shielded token exchange" },
+  { label:"Confidential Send", panel:"send",       icon:"↗",  desc:"Shielded transfer" },
   { label:"Withdraw",          panel:"withdraw",   icon:"↙",  desc:"Exit to public address" },
   { label:"Bridge",            panel:"bridge",     icon:"⟺", desc:"Cross-chain transfer" },
   { label:"Analytics",         panel:"analytics",  icon:"📈", desc:"TVL, charts, heatmaps" },
@@ -1929,7 +1929,12 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <TxConfirmModal open={!!confirmTx} tx={confirmTx} onConfirm={onConfirm} onCancel={onCancel}/>
-      <PH icon="🛡" title="SHIELD" sub="Deposit into ShieldVault v2 — Arc Testnet"/>
+      <PH icon="🛡" title="SHIELD" sub="Shield USDC — move to confidential balance (Arc Testnet)"/>
+      <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.12)", borderRadius:4, padding:"8px 12px", marginBottom:8, fontSize:8, color:"#4a7c5f", fontFamily:"monospace", lineHeight:1.6 }}>
+        ✦ <b style={{ color:"#00FFB0" }}>Governed Visibility</b> — shielded balances are confidential by default.
+        Only you and parties you explicitly authorize can view your activity.
+        Aligned with <a href="https://www.arc.io/privacy-whitepaper" target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>Arc Privacy Sector whitepaper</a>.
+      </div>
       <NotOnArcWarning/>
       {/* Live stats */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5, marginBottom:10 }}>
@@ -2086,7 +2091,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⇄" title="PRIVATE SWAP" sub="ZK-routed exchange on Arc Testnet — real transaction"/>
+      <PH icon="⇄" title="PRIVATE SWAP" sub="Shielded exchange on Arc Testnet — confidential by design"/>
       <NotOnArcWarning/>
       <ShieldedWallet bals={bals} tokenFilter={["USDC","EURC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }}/>
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:10 }}>
@@ -2172,7 +2177,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
 
     const ok = await sendRealTx({
       label: "Shielded Send",
-      description: `Private ${amount} USDC → ${dest.slice(0,8)}… (untraceable on ARCScan)`,
+      description: `Confidential ${amount} USDC → ${dest.slice(0,8)}… (shielded)`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
     });
 
@@ -2192,7 +2197,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       // Build a shareable receipt the sender can copy and send to recipient out-of-band
       notify(
         "Shielded Send ✓",
-        `${amount} USDC sent privately. The recipient needs the transfer code to claim — it has been copied to your clipboard.`,
+        `${amount} USDC sent confidentially. The transfer code has been copied to your clipboard — share it with the recipient to claim.`,
         "info"
       );
       // Copy receipt to clipboard silently
@@ -2215,10 +2220,10 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <TxConfirmModal open={!!confirmTx} tx={confirmTx} onConfirm={onConfirm} onCancel={onCancel}/>
-      <PH icon="↗" title="SEND" sub="Shielded send (private) or direct transfer (public)"/>
+      <PH icon="↗" title="SEND" sub="Confidential send (shielded) or public transfer (on-chain)"/>
       <NotOnArcWarning/>
       <div style={{ display:"flex", gap:7, marginBottom:14 }}>
-        {[["shielded","🛡 Shielded Send","Untraceable — routes through ShieldVault"],["public","↗ Public Send","Direct transfer — visible on ARCScan"]].map(([m,label,desc])=>(
+        {[["shielded","🛡 Confidential Send","Shielded — governed visibility"],["public","↗ Public Send","Direct transfer — visible on ARCScan"]].map(([m,label,desc])=>(
           <button key={m} onClick={()=>setMode(m)} style={{ flex:1, padding:"9px 10px", background:mode===m?"rgba(0,255,176,.1)":"rgba(0,0,0,.35)", border:`1.5px solid ${mode===m?"rgba(0,255,176,.5)":"rgba(0,255,176,.1)"}`, borderRadius:5, cursor:"pointer", textAlign:"left", transition:"all .2s" }}>
             <div style={{ fontSize:10, color:mode===m?"#00FFB0":"#94a3b8", fontFamily:"monospace", fontWeight:700, marginBottom:2 }}>{label}</div>
             <div style={{ fontSize:8, color:mode===m?"#4a7c5f":"#334155", fontFamily:"monospace" }}>{desc}</div>
@@ -2229,11 +2234,11 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
         ? <>
             <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
             <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-              🛡 Private send — the transfer is routed through the privacy pool. The recipient's address is not visible on-chain. Requires an available shielded balance (use Shield panel first).
+              🛡 Confidential send — shielded balance is transferred with governed visibility. Sender and recipient addresses are not linked on-chain.
             </div>
           </>
         : <div style={{ background:"rgba(245,158,11,.04)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
-            ⚠ Direct USDC transfer. Fully visible on ARCScan. Use Shielded Send for privacy.
+            ⚠ Public transfer — fully visible on-chain. Use Confidential Send to shield this transaction.
           </div>
       }
       <OsField label="RECIPIENT (0x... or name.arc)" value={to} onChange={e=>setTo(e.target.value)} placeholder="0x... or name.arc" icon="↗" hint={resolving?"Resolving...":resolved?`✓ Resolved: ${sh(resolved)}`:null}/>
@@ -2317,11 +2322,11 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="↙" title="WITHDRAW" sub="Exit shielded pool → public address"/>
+      <PH icon="↙" title="WITHDRAW" sub="Unshield — exit confidential balance to public address"/>
       <NotOnArcWarning/>
       <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Exit the privacy pool — funds are sent to the destination address. No link between the original deposit and this withdrawal is visible on-chain.
+        🛡 Unshield — exit the confidential balance to a public address. Governed visibility: only you and parties you authorize can link deposit and withdrawal.
       </div>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
@@ -2438,7 +2443,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       <NotOnArcWarning/>
       <ShieldedWallet bals={bals} tokenFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Private cross-chain transfer. The recipient address on the destination chain is hidden — only the amount and destination chain are visible on-chain.
+        🛡 Confidential cross-chain transfer. Recipient address has governed visibility — only authorized parties can access it.
       </div>
       <div style={{ marginBottom:12 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION CHAIN</div>
@@ -3136,7 +3141,7 @@ function AgentsPanel({ agentLogs }) {
   const AG=[
     {id:"SA",name:"ShieldAgent",   role:"Vault monitoring & deposits",    load:14, s:"ACTIVE",  c:"#00FFB0"},
     {id:"SW",name:"SwapAgent",     role:"Arc StableFX routing",            load:8,  s:"ACTIVE",  c:"#4ade80"},
-    {id:"PV",name:"PrivacyAgent",  role:"Stealth scanning",                load:31, s:"ACTIVE",  c:"#00FFB0"},
+    {id:"PV",name:"PrivacyAgent",  role:"Confidential state scanning",                load:31, s:"ACTIVE",  c:"#00FFB0"},
     {id:"RK",name:"RiskAgent",     role:"Anomaly & volatility scoring",    load:5,  s:"ACTIVE",  c:"#4ade80"},
     {id:"ZK",name:"ZKAgent",       role:"Groth16 / PLONK proof gen",       load:62, s:"ACTIVE",  c:"#fbbf24"},
     {id:"BR",name:"BridgeAgent",   role:"CCTP v2 cross-chain relay",       load:0,  s:"STANDBY", c:"#64748b"},
