@@ -1712,14 +1712,16 @@ function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
   const rawUsdc = bals.rawUsdc  ?? 0n;
   const rawEurc = bals.rawEurc  ?? 0n;
   const rawCbtc = bals.rawCbtc  ?? 0n;
-  const totalUsd = bals.totalUsd ?? 0;
   const noteCount = bals.noteCount ?? 0;
 
-  const tokens = [
-    { sym: "USDC",   val: usdc,  raw: rawUsdc,  dec: 6, fmt: v => "$" + v.toFixed(2),   color: "#00FFB0" },
-    { sym: "EURC",   val: eurc,  raw: rawEurc,  dec: 6, fmt: v => "€" + v.toFixed(2),   color: "#60a5fa" },
-    { sym: "cirBTC", val: cbtc,  raw: rawCbtc,  dec: 8, fmt: v => "₿" + v.toFixed(5),   color: "#F7931A" },
-  ].filter(t => !tokenFilter || tokenFilter.includes(t.sym));
+  const allTokens = [
+    { sym: "USDC",   val: usdc,  raw: rawUsdc,  dec: 6, fmt: v => "$" + v.toFixed(2),   color: "#00FFB0", usdVal: usdc },
+    { sym: "EURC",   val: eurc,  raw: rawEurc,  dec: 6, fmt: v => "€" + v.toFixed(2),   color: "#60a5fa", usdVal: eurc * 1.08 },
+    { sym: "cirBTC", val: cbtc,  raw: rawCbtc,  dec: 8, fmt: v => "₿" + v.toFixed(5),   color: "#F7931A", usdVal: cbtc * 0 },
+  ];
+  const tokens = allTokens.filter(t => !tokenFilter || tokenFilter.includes(t.sym));
+  // Total only reflects the filtered tokens (e.g. BridgePanel filters to EURC only)
+  const totalUsd = tokens.reduce((sum, t) => sum + (isFinite(t.usdVal) ? t.usdVal : 0), 0);
 
   if (compact) {
     // Single-line version: just show available token + MAX
@@ -2479,9 +2481,22 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
   const tvlBtc   = ps.shieldedBtc   != null ? Number(ps.shieldedBtc)   / 1e8  : null;
   const leafCount = ps.leafCount     != null ? Number(ps.leafCount)           : null;
 
-  // ── On-chain 24h stats via eth_getLogs ───────────────────────────────────
-  // Deposited(address,address,uint256,bytes32,uint256) → topic0 = keccak256
-  const [stats24h, setStats24h] = useState({ txCount: null, volume: null, fees: null, allTimeVolume: null });
+  // ── On-chain stats: 24h + all-time via eth_getLogs ───────────────────────
+  // Protocol fee: 0% during launch phase (launch phase = free deposits per ShieldVault config)
+  // We still track cumulative volume to compute fees when fee switch activates
+  const FEES_KEY = "privarc_protocol_fees"; // persisted across sessions
+  const PROTOCOL_FEE_BPS = 0; // 0 bps during launch phase; update when fee goes live
+
+  const [stats24h, setStats24h] = useState(() => {
+    // Load persisted all-time stats
+    try {
+      const saved = JSON.parse(localStorage.getItem(FEES_KEY) || "{}");
+      return { txCount: null, volume: null, fees: null,
+               allTimeVolume: saved.allTimeVolume ?? null,
+               allTimeFees:   saved.allTimeFees   ?? null,
+               allTimeTxCount: saved.allTimeTxCount ?? null };
+    } catch { return { txCount: null, volume: null, fees: null, allTimeVolume: null, allTimeFees: null, allTimeTxCount: null }; }
+  });
 
   useEffect(() => {
     if (!onArc) return;
@@ -2489,31 +2504,51 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
       try {
         const blockHex = await rpcCall("eth_blockNumber", []);
         const currentBlock = parseInt(blockHex, 16);
-        // Arc Testnet: ~2 blocks/sec → 24h ≈ 172800 blocks
-        const fromBlock = Math.max(0, currentBlock - 172800);
-        // Deposited event topic (keccak256 of signature)
-        const DEPOSITED = "0x8fc3a470c0be88a3da0e4b5d74f2b8f40e7e2c66e1e4f9e3bdcf93d4bfa37d5";
-        const logs = await rpcCall("eth_getLogs", [{
-          fromBlock: "0x" + fromBlock.toString(16),
-          toBlock:   "latest",
-          address:   CONTRACTS.ShieldVault,
-        }]);
-        const count24h = Array.isArray(logs) ? logs.length : 0;
-        // Volume: sum amounts from Deposited logs (data[2] = amount in USDC 6-dec)
-        let vol24h = 0;
-        if (Array.isArray(logs)) {
+        const from24h = Math.max(0, currentBlock - 172800); // ~24h at 2 blk/sec
+
+        // Fetch ALL ShieldVault events (all-time + 24h)
+        const [logs24h, logsAll] = await Promise.all([
+          rpcCall("eth_getLogs", [{ fromBlock: "0x"+from24h.toString(16), toBlock:"latest", address: CONTRACTS.ShieldVault }]),
+          rpcCall("eth_getLogs", [{ fromBlock: "0x0", toBlock:"latest", address: CONTRACTS.ShieldVault }]),
+        ]);
+
+        const parseVolume = (logs) => {
+          let vol = 0;
+          if (!Array.isArray(logs)) return vol;
           for (const log of logs) {
             try {
-              // Deposited log data encodes amount at offset 64 (3rd word)
+              // Deposited(bytes32 commitment, address token, uint256 amount, ...)
+              // topics[1]=commitment, topics[2]=token, data = amount + leafIndex + root
               const data = log.data?.replace("0x","") || "";
-              if (data.length >= 192) {
-                const amtHex = data.slice(128, 192);
-                vol24h += Number(BigInt("0x"+amtHex)) / 1e6;
+              if (data.length >= 64) {
+                const amtHex = data.slice(0, 64);
+                const amt = Number(BigInt("0x"+amtHex)) / 1e6;
+                if (isFinite(amt) && amt > 0 && amt < 1e9) vol += amt;
               }
             } catch {}
           }
-        }
-        setStats24h({ txCount: count24h, volume: vol24h.toFixed(2), fees: (vol24h * 0).toFixed(2), allTimeVolume: null });
+          return vol;
+        };
+
+        const vol24h   = parseVolume(logs24h);
+        const volAll   = parseVolume(logsAll);
+        const cnt24h   = Array.isArray(logs24h) ? logs24h.length : 0;
+        const cntAll   = Array.isArray(logsAll)  ? logsAll.length  : 0;
+        const fees24h  = vol24h * PROTOCOL_FEE_BPS / 10000;
+        const feesAll  = volAll * PROTOCOL_FEE_BPS / 10000;
+
+        // Persist all-time stats
+        const persisted = { allTimeVolume: volAll.toFixed(2), allTimeFees: feesAll.toFixed(4), allTimeTxCount: cntAll, updatedAt: Date.now() };
+        try { localStorage.setItem(FEES_KEY, JSON.stringify(persisted)); } catch {}
+
+        setStats24h({
+          txCount:        cnt24h,
+          volume:         vol24h.toFixed(2),
+          fees:           fees24h.toFixed(4),
+          allTimeVolume:  volAll.toFixed(2),
+          allTimeFees:    feesAll.toFixed(4),
+          allTimeTxCount: cntAll,
+        });
       } catch (e) { console.warn("getLogs:", e); }
     };
     fetchLogs();
@@ -2534,13 +2569,16 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
 
   const mkSpk = (data, col, label, fmt = v => v.toLocaleString(), realValue = null) => {
     if (!data || data.length === 0) return null;
-    const mx = Math.max(...data), mn = Math.min(...data);
+    const clean = data.map(v => (isFinite(v) ? v : 0));
+    const mx = Math.max(...clean) || 1;
+    const mn = Math.min(...clean);
     const W = 260, H = 55;
-    const pts = data.map((v, i) => ({ x: (i / (data.length - 1)) * W, y: H - ((v - mn) / (mx - mn || 1)) * H * .82 - H * .09 }));
+    const pts = clean.map((v, i) => ({ x: (i / (clean.length - 1)) * W, y: H - ((v - mn) / (mx - mn || 1)) * H * .82 - H * .09 }));
     const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
-    const last = realValue != null ? realValue : data[data.length - 1];
-    const prev = data[data.length - 2];
-    const chg = prev ? ((data[data.length - 1] - prev) / prev * 100) : 0;
+    const last = realValue != null ? realValue : clean[clean.length - 1];
+    const prev = clean[clean.length - 2];
+    const rawChg = prev ? ((clean[clean.length - 1] - prev) / prev * 100) : 0;
+    const chg = isFinite(rawChg) ? rawChg : 0;
     return (
       <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(0,255,176,.1)", borderRadius: 5, padding: "11px 13px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 7 }}>
@@ -2562,20 +2600,18 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
 
   // Build TVL sparkline from txHistory (cumulative shielded amount over time)
   const tvlHistory = useMemo(() => {
+    const base = (tvlUsdc != null && isFinite(tvlUsdc)) ? tvlUsdc : 0;
     if (!txHistory || txHistory.length === 0) {
-      // If TVL is real, show a flat line at current value (30 points)
-      const base = tvlUsdc || 0;
-      return Array.from({ length: 30 }, (_, i) => Math.max(0, base + (i === 29 ? 0 : (Math.random() - 0.5) * base * 0.02)));
+      return Array.from({ length: 30 }, () => base);
     }
-    // Reconstruct TVL timeline from deposits in txHistory
-    let running = 0;
+    let running = base;
     const points = [];
     txHistory.slice().reverse().forEach(tx => {
-      if (tx.type === "Shield") running += parseFloat(tx.amount || 0);
-      else if (tx.type === "Withdraw") running = Math.max(0, running - parseFloat(tx.amount || 0));
-      points.push(running);
+      const amt = parseFloat(tx.amount) || 0;
+      if (tx.label?.includes("Shield")) running = Math.max(0, running + amt);
+      else if (tx.label?.includes("Withdraw")) running = Math.max(0, running - amt);
+      points.push(isFinite(running) ? running : 0);
     });
-    // Pad to 30 points
     while (points.length < 30) points.unshift(points[0] || 0);
     return points.slice(-30);
   }, [txHistory, tvlUsdc]);
@@ -2626,20 +2662,43 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
 
       {/* TVL + Tx charts */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-        {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$" + v.toFixed(2), tvlUsdc)}
+        {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$" + (v||0).toFixed(2), tvlUsdc)}
         <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(14,165,233,.1)", borderRadius:5, padding:"11px 13px" }}>
           <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:6 }}>LAST 24H ON-CHAIN</div>
           {[
-            { l:"TX COUNT",   v: stats24h.txCount  != null ? stats24h.txCount.toString()   : "…", c:"#0EA5E9" },
-            { l:"VOLUME",     v: stats24h.volume   != null ? "$"+stats24h.volume            : "…", c:"#00FFB0" },
-            { l:"FEES",       v: stats24h.fees     != null ? "$"+stats24h.fees              : "0", c:"#fbbf24" },
+            { l:"TX COUNT",  v: stats24h.txCount  != null ? stats24h.txCount.toString() : "…", c:"#0EA5E9" },
+            { l:"VOLUME",    v: stats24h.volume   != null ? "$"+stats24h.volume          : "…", c:"#00FFB0" },
+            { l:"FEES",      v: stats24h.fees     != null ? "$"+stats24h.fees            : "…", c:"#fbbf24" },
           ].map(s => (
             <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
               <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
               <span style={{ fontSize:10, color:s.c, fontFamily:"monospace", fontWeight:700 }}>{s.v}</span>
             </div>
           ))}
-          <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:4 }}>Updates every 30s via eth_getLogs</div>
+          <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:4 }}>Updates every 30s · eth_getLogs</div>
+        </div>
+      </div>
+
+      {/* All-time protocol stats — persistent */}
+      <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(251,191,36,.12)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+          <div style={{ fontSize:8, color:"#fbbf24", letterSpacing:".14em", fontFamily:"monospace" }}>⚡ PROTOCOL FEES — ALL TIME</div>
+          <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>Launch phase · 0 bps</div>
+        </div>
+        {[
+          { l:"Total Volume",   v: stats24h.allTimeVolume  != null ? "$"+Number(stats24h.allTimeVolume).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})  : "loading…", c:"#00FFB0" },
+          { l:"Total Tx",       v: stats24h.allTimeTxCount != null ? stats24h.allTimeTxCount.toLocaleString()                                                                         : "loading…", c:"#0EA5E9" },
+          { l:"Fees Collected", v: stats24h.allTimeFees    != null ? "$"+Number(stats24h.allTimeFees).toFixed(4)                                                                       : "loading…", c:"#fbbf24" },
+          { l:"Fee Rate",       v: "0 bps (launch phase)",                                                                                                                              c:"#64748b" },
+        ].map(s => (
+          <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
+            <span style={{ fontSize:9, color:s.c, fontFamily:"monospace", fontWeight:600 }}>{s.v}</span>
+          </div>
+        ))}
+        <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:6, lineHeight:1.5 }}>
+          Computed from ShieldVault on-chain events (deposits + swaps + sends + withdrawals + bridges).
+          Persisted locally. Fee switch activates at governance vote.
         </div>
       </div>
 
