@@ -1664,7 +1664,16 @@ function useShieldedBalances(prices, address) {
     for (const n of notes) {
       const k = n.token?.toLowerCase?.();
       const match = Object.keys(acc).find(a => a.toLowerCase() === k);
-      if (match) acc[match] += BigInt(n.amount || 0);
+      if (match) {
+        try {
+          // Guard: old notes may have float amounts ("10.5") or corrupt values
+          const raw = n.amount;
+          const safe = raw == null ? 0n
+            : typeof raw === "bigint" ? raw
+            : BigInt(Math.round(Number(raw)));   // handles "10.5", "10000000", 0, etc.
+          acc[match] += safe;
+        } catch { /* skip corrupt note */ }
+      }
     }
     // Convert to display values — guard against BigInt overflow or zero-address tokens
     const usdc  = isFinite(Number(acc[NATIVE_USDC]))      ? Number(acc[NATIVE_USDC])      / 1e6 : 0;
@@ -2030,7 +2039,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
     }
 
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === tokenInAddr.toLowerCase());
+    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig && n.token.toLowerCase() === tokenInAddr.toLowerCase());
     if (!note) {
       notify("Private Swap", `No shielded ${fr} note found. Shield ${fr} first.`, "error");
       setLoading(false); return;
@@ -2077,7 +2086,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
 
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
-      const remaining = BigInt(note.amount) - amountBig;
+      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       // Output note in tokenOut
       const outAmount = BigInt(Math.round(Number(q.out) * 1e6));
@@ -2142,7 +2151,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     // Check for existing shielded note
     const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(n.amount) >= amountBig);
+    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
     if (!note) {
       notify("Send", "No shielded note found. Shield USDC first using the Shield panel.", "error");
       setLoading(false); return;
@@ -2185,7 +2194,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
 
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
-      const remaining = BigInt(note.amount) - amountBig;
+      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       // Store output note for sender (they can redeem on behalf if needed)
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
@@ -2274,7 +2283,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
     const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === NATIVE_USDC.toLowerCase());
+    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig && n.token.toLowerCase() === NATIVE_USDC.toLowerCase());
     if (!note) {
       notify("Withdraw", "No shielded USDC note found. Shield funds first.", "error");
       setLoading(false); return;
@@ -2314,7 +2323,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
-      const remaining = BigInt(note.amount) - amountBig;
+      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       saveNotes(account?.address, updated);
     }
@@ -2332,7 +2341,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       </div>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="↙" suffix="USDC"/>
       <OsField label="DESTINATION (defaults to connected wallet)" value={dest} onChange={e=>setDest(e.target.value)} placeholder={account?.address||"0x..."} icon="📍"/>
-      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Available", bals ? bals.usdc.toFixed(2) + " USDC" : "—","local notes"],["Gas","USDC","Arc Testnet"]]}/>
+      <IG items={[["Privacy","✓ Unlinkable","ZK note spend"],["Available", ((bals?.usdc ?? 0)).toFixed(2) + " USDC","local notes"],["Gas","USDC","Arc Testnet"]]}/>
       {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes found. Use the Shield panel to deposit USDC first.
@@ -2341,7 +2350,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       <ArcBtn
         label={!onArc?"⚠ SWITCH TO ARC TESTNET":"⟶ WITHDRAW FROM SHIELD"}
         onClick={onArc?withdraw:undefined} loading={loading}
-        disabled={!onArc||!amount||Number(amount)<=0||notes.length===0}
+        disabled={!onArc||!amount||Number(amount)<=0||(bals?.noteCount??0)===0}
         color={onArc?"#00FFB0":"#F59E0B"}
       />
     </div>
@@ -2384,7 +2393,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 
     const notes = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(n.amount) >= amountBig && n.token.toLowerCase() === EURC.toLowerCase());
+    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig && n.token.toLowerCase() === EURC.toLowerCase());
     if (!note) {
       notify("Bridge", "No shielded EURC note found. Shield EURC first.", "error");
       setLoading(false); return;
@@ -2430,7 +2439,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
-      const remaining = BigInt(note.amount) - amountBig;
+      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       saveNotes(account?.address, updated);
       notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.`, "success");
@@ -2466,7 +2475,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       <ArcBtn
         label={!onArc?"⚠ SWITCH TO ARC TESTNET":`⟶ BRIDGE TO ${ch?.name?.toUpperCase()}`}
         onClick={onArc?bridge:undefined} loading={loading}
-        disabled={!onArc||!amount||Number(amount)<=0||notes.length===0}
+        disabled={!onArc||!amount||Number(amount)<=0||(bals?.noteCount??0)===0}
         color={onArc?"#00FFB0":"#F59E0B"}
       />
     </div>
