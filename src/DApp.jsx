@@ -2483,202 +2483,199 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 }
 
 function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
-  // ── Real on-chain data ────────────────────────────────────────────────────
   const ps = protocolStats || {};
-  const tvlUsdc  = ps.shieldedUsdc  != null ? Number(ps.shieldedUsdc)  / 1e6  : null;
-  const tvlEurc  = ps.shieldedEurc  != null ? Number(ps.shieldedEurc)  / 1e6  : null;
-  const tvlBtc   = ps.shieldedBtc   != null ? Number(ps.shieldedBtc)   / 1e8  : null;
-  const leafCount = ps.leafCount     != null ? Number(ps.leafCount)           : null;
 
-  // ── On-chain stats: 24h + all-time via eth_getLogs ───────────────────────
-  // Protocol fee: 0% during launch phase (launch phase = free deposits per ShieldVault config)
-  // We still track cumulative volume to compute fees when fee switch activates
-  const FEES_KEY = "privarc_protocol_fees"; // persisted across sessions
-  const PROTOCOL_FEE_BPS = 0; // 0 bps during launch phase; update when fee goes live
+  // Safe numeric helpers
+  const safeNum = (v, div=1) => { try { const n = Number(v) / div; return isFinite(n) ? n : 0; } catch { return 0; } };
+  const safeFmt = (v, dec=2) => { try { const n = Number(v); return isFinite(n) ? n.toFixed(dec) : "0." + "0".repeat(dec); } catch { return "—"; } };
+
+  const tvlUsdc   = ps.shieldedUsdc  != null ? safeNum(ps.shieldedUsdc,  1e6) : null;
+  const tvlEurc   = ps.shieldedEurc  != null ? safeNum(ps.shieldedEurc,  1e6) : null;
+  const tvlBtc    = ps.shieldedBtc   != null ? safeNum(ps.shieldedBtc,   1e8) : null;
+  const leafCount = ps.leafCount     != null ? Number(ps.leafCount) || 0       : null;
+  const isConnected = !!onArc;
+
+  const [blockchainStats, setBlockchainStats] = useState(null);
+  useEffect(() => {
+    if (!onArc) return;
+    rpcCall("eth_blockNumber", []).then(hex => {
+      const n = parseInt(hex, 16);
+      if (isFinite(n)) setBlockchainStats({ blockNum: n });
+    }).catch(() => {});
+  }, [onArc]);
+
+  // ── Protocol fees — persistent ──────────────────────────────────────────
+  const FEES_KEY = "privarc_protocol_fees";
+  const PROTOCOL_FEE_BPS = 0;
 
   const [stats24h, setStats24h] = useState(() => {
-    // Load persisted all-time stats
     try {
-      const saved = JSON.parse(localStorage.getItem(FEES_KEY) || "{}");
-      return { txCount: null, volume: null, fees: null,
-               allTimeVolume: saved.allTimeVolume ?? null,
-               allTimeFees:   saved.allTimeFees   ?? null,
-               allTimeTxCount: saved.allTimeTxCount ?? null };
-    } catch { return { txCount: null, volume: null, fees: null, allTimeVolume: null, allTimeFees: null, allTimeTxCount: null }; }
+      const s = JSON.parse(localStorage.getItem(FEES_KEY) || "{}");
+      return {
+        txCount: null, volume: null, fees: null,
+        allTimeVolume:   s.allTimeVolume   ?? null,
+        allTimeFees:     s.allTimeFees     ?? null,
+        allTimeTxCount:  s.allTimeTxCount  ?? null,
+      };
+    } catch { return { txCount:null, volume:null, fees:null, allTimeVolume:null, allTimeFees:null, allTimeTxCount:null }; }
   });
 
   useEffect(() => {
     if (!onArc) return;
-    const fetchLogs = async () => {
+    const run = async () => {
       try {
         const blockHex = await rpcCall("eth_blockNumber", []);
-        const currentBlock = parseInt(blockHex, 16);
-        const from24h = Math.max(0, currentBlock - 172800); // ~24h at 2 blk/sec
+        const cur = parseInt(blockHex, 16);
+        if (!isFinite(cur)) return;
+        const from24 = Math.max(0, cur - 172800);
 
-        // Fetch ALL ShieldVault events (all-time + 24h)
-        const [logs24h, logsAll] = await Promise.all([
-          rpcCall("eth_getLogs", [{ fromBlock: "0x"+from24h.toString(16), toBlock:"latest", address: CONTRACTS.ShieldVault }]),
-          rpcCall("eth_getLogs", [{ fromBlock: "0x0", toBlock:"latest", address: CONTRACTS.ShieldVault }]),
+        const [logs24, logsAll] = await Promise.all([
+          rpcCall("eth_getLogs", [{ fromBlock:"0x"+from24.toString(16), toBlock:"latest", address:CONTRACTS.ShieldVault }]),
+          rpcCall("eth_getLogs", [{ fromBlock:"0x0", toBlock:"latest", address:CONTRACTS.ShieldVault }]),
         ]);
 
-        const parseVolume = (logs) => {
-          let vol = 0;
-          if (!Array.isArray(logs)) return vol;
+        const parseVol = (logs) => {
+          if (!Array.isArray(logs)) return 0;
+          let v = 0;
           for (const log of logs) {
             try {
-              // Deposited(bytes32 commitment, address token, uint256 amount, ...)
-              // topics[1]=commitment, topics[2]=token, data = amount + leafIndex + root
-              const data = log.data?.replace("0x","") || "";
-              if (data.length >= 64) {
-                const amtHex = data.slice(0, 64);
-                const amt = Number(BigInt("0x"+amtHex)) / 1e6;
-                if (isFinite(amt) && amt > 0 && amt < 1e9) vol += amt;
+              const d = (log.data || "").replace("0x","");
+              if (d.length >= 64) {
+                const a = Number(BigInt("0x"+d.slice(0,64))) / 1e6;
+                if (isFinite(a) && a > 0 && a < 1e9) v += a;
               }
             } catch {}
           }
-          return vol;
+          return v;
         };
 
-        const vol24h   = parseVolume(logs24h);
-        const volAll   = parseVolume(logsAll);
-        const cnt24h   = Array.isArray(logs24h) ? logs24h.length : 0;
-        const cntAll   = Array.isArray(logsAll)  ? logsAll.length  : 0;
-        const fees24h  = vol24h * PROTOCOL_FEE_BPS / 10000;
-        const feesAll  = volAll * PROTOCOL_FEE_BPS / 10000;
+        const v24  = parseVol(logs24);
+        const vAll = parseVol(logsAll);
+        const c24  = Array.isArray(logs24) ? logs24.length : 0;
+        const cAll = Array.isArray(logsAll) ? logsAll.length : 0;
 
-        // Persist all-time stats
-        const persisted = { allTimeVolume: volAll.toFixed(2), allTimeFees: feesAll.toFixed(4), allTimeTxCount: cntAll, updatedAt: Date.now() };
-        try { localStorage.setItem(FEES_KEY, JSON.stringify(persisted)); } catch {}
+        try { localStorage.setItem(FEES_KEY, JSON.stringify({ allTimeVolume:vAll.toFixed(2), allTimeFees:(vAll*PROTOCOL_FEE_BPS/10000).toFixed(4), allTimeTxCount:cAll, updatedAt:Date.now() })); } catch {}
 
         setStats24h({
-          txCount:        cnt24h,
-          volume:         vol24h.toFixed(2),
-          fees:           fees24h.toFixed(4),
-          allTimeVolume:  volAll.toFixed(2),
-          allTimeFees:    feesAll.toFixed(4),
-          allTimeTxCount: cntAll,
+          txCount: c24,
+          volume:  v24.toFixed(2),
+          fees:    (v24*PROTOCOL_FEE_BPS/10000).toFixed(4),
+          allTimeVolume:  vAll.toFixed(2),
+          allTimeFees:    (vAll*PROTOCOL_FEE_BPS/10000).toFixed(4),
+          allTimeTxCount: cAll,
         });
-      } catch (e) { console.warn("getLogs:", e); }
+      } catch(e) { console.warn("[PrivARC analytics]", e.message); }
     };
-    fetchLogs();
-    const id = setInterval(fetchLogs, 30000);
+    run();
+    const id = setInterval(run, 30000);
     return () => clearInterval(id);
   }, [onArc]);
 
-  const [blockchainStats, setBlockchainStats] = useState(null);
-
-  useEffect(() => {
-    if (!onArc) return;
-    // Read block number to approximate daily tx count
-    rpcCall("eth_blockNumber", []).then(hex => {
-      const blockNum = parseInt(hex, 16);
-      setBlockchainStats({ blockNum });
-    }).catch(() => {});
-  }, [onArc]);
-
-  const mkSpk = (data, col, label, fmt = v => v.toLocaleString(), realValue = null) => {
-    if (!data || data.length === 0) return null;
-    const clean = data.map(v => (isFinite(v) ? v : 0));
-    const mx = Math.max(...clean) || 1;
-    const mn = Math.min(...clean);
-    const W = 260, H = 55;
-    const pts = clean.map((v, i) => ({ x: (i / (clean.length - 1)) * W, y: H - ((v - mn) / (mx - mn || 1)) * H * .82 - H * .09 }));
-    const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
-    const last = realValue != null ? realValue : clean[clean.length - 1];
-    const prev = clean[clean.length - 2];
-    const rawChg = prev ? ((clean[clean.length - 1] - prev) / prev * 100) : 0;
-    const chg = isFinite(rawChg) ? rawChg : 0;
-    return (
-      <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(0,255,176,.1)", borderRadius: 5, padding: "11px 13px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 7 }}>
-          <div>
-            <div style={{ fontSize: 7, color: "#64748b", letterSpacing: ".15em", fontFamily: "monospace", marginBottom: 3 }}>{label}</div>
-            <div style={{ fontSize: 17, fontWeight: 700, color: "#ffffff", fontFamily: "monospace" }}>{fmt(last)}</div>
+  // ── Sparkline builder — fully NaN-safe ──────────────────────────────────
+  const mkSpk = (rawData, col, label, fmt = v => String(v), realValue = null) => {
+    try {
+      if (!Array.isArray(rawData) || rawData.length < 2) return null;
+      const data = rawData.map(v => { const n = Number(v); return isFinite(n) ? n : 0; });
+      const mx = Math.max(...data) || 1;
+      const mn = Math.min(...data);
+      const range = mx - mn || 1;
+      const W = 260, H = 55;
+      const pts = data.map((v, i) => ({
+        x: (i / (data.length - 1)) * W,
+        y: H - ((v - mn) / range) * H * .82 - H * .09,
+      })).filter(p => isFinite(p.x) && isFinite(p.y));
+      if (pts.length < 2) return null;
+      const path = pts.map((p,i) => `${i===0?"M":"L"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+      const lastPt = pts[pts.length - 1];
+      const lastV  = realValue != null ? realValue : data[data.length - 1];
+      const prevV  = data[data.length - 2] || data[data.length - 1];
+      const rawChg = prevV ? ((data[data.length-1] - prevV) / prevV * 100) : 0;
+      const chg    = isFinite(rawChg) ? rawChg : 0;
+      return (
+        <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:7 }}>
+            <div>
+              <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:3 }}>{label}</div>
+              <div style={{ fontSize:17, fontWeight:700, color:"#ffffff", fontFamily:"monospace" }}>{fmt(lastV)}</div>
+            </div>
+            <div style={{ fontSize:9, color:chg>=0?"#00FFB0":"#f87171", fontFamily:"monospace", background:`rgba(${chg>=0?"0,255,176":"248,113,113"},.08)`, border:`1px solid rgba(${chg>=0?"0,255,176":"248,113,113"},.2)`, borderRadius:2, padding:"2px 5px" }}>{chg>=0?"+":""}{chg.toFixed(1)}%</div>
           </div>
-          <div style={{ fontSize: 9, color: chg >= 0 ? "#00FFB0" : "#f87171", fontFamily: "monospace", background: `rgba(${chg >= 0 ? "0,255,176" : "248,113,113"},.08)`, border: `1px solid rgba(${chg >= 0 ? "0,255,176" : "248,113,113"},.2)`, borderRadius: 2, padding: "2px 5px" }}>{chg >= 0 ? "+" : ""}{chg.toFixed(1)}%</div>
+          <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height:48 }}>
+            <defs><linearGradient id={`ag${col}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity=".2"/><stop offset="100%" stopColor={col} stopOpacity="0"/></linearGradient></defs>
+            <path d={`${path} L${W} ${H} L0 ${H} Z`} fill={`url(#ag${col})`}/>
+            <path d={path} fill="none" stroke={col} strokeWidth="1.5" opacity=".85"/>
+            <circle cx={lastPt.x} cy={lastPt.y} r="3" fill={col}/>
+          </svg>
         </div>
-        <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 48 }}>
-          <defs><linearGradient id={`ag${label}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity=".2" /><stop offset="100%" stopColor={col} stopOpacity="0" /></linearGradient></defs>
-          <path d={`${path} L${W} ${H} L0 ${H} Z`} fill={`url(#ag${label})`} />
-          <path d={path} fill="none" stroke={col} strokeWidth="1.5" opacity=".85" />
-          <circle cx={pts[pts.length - 1].x} cy={pts[pts.length - 1].y} r="3" fill={col} />
-        </svg>
-      </div>
-    );
+      );
+    } catch(e) {
+      console.warn("[mkSpk]", e.message);
+      return null;
+    }
   };
 
-  // Build TVL sparkline from txHistory (cumulative shielded amount over time)
+  // ── Sparkline data ───────────────────────────────────────────────────────
   const tvlHistory = useMemo(() => {
-    const base = (tvlUsdc != null && isFinite(tvlUsdc)) ? tvlUsdc : 0;
-    if (!txHistory || txHistory.length === 0) {
-      return Array.from({ length: 30 }, () => base);
-    }
+    const base = tvlUsdc != null && isFinite(tvlUsdc) ? tvlUsdc : 0;
+    if (!txHistory || txHistory.length === 0) return Array.from({length:30}, () => base);
     let running = base;
-    const points = [];
-    txHistory.slice().reverse().forEach(tx => {
-      const amt = parseFloat(tx.amount) || 0;
-      if (tx.label?.includes("Shield")) running = Math.max(0, running + amt);
-      else if (tx.label?.includes("Withdraw")) running = Math.max(0, running - amt);
-      points.push(isFinite(running) ? running : 0);
+    const pts = [];
+    [...txHistory].reverse().forEach(tx => {
+      const a = parseFloat(tx.amount) || 0;
+      if (tx.label?.includes("Shield"))   running = Math.max(0, running + a);
+      if (tx.label?.includes("Withdraw")) running = Math.max(0, running - a);
+      pts.push(isFinite(running) ? running : 0);
     });
-    while (points.length < 30) points.unshift(points[0] || 0);
-    return points.slice(-30);
+    while (pts.length < 30) pts.unshift(pts[0] || 0);
+    return pts.slice(-30).map(v => isFinite(v) ? v : 0);
   }, [txHistory, tvlUsdc]);
 
-  const txCountHistory = useMemo(() => {
-    if (!txHistory || txHistory.length === 0) return Array.from({ length: 30 }, () => 0);
-    // Count tx per "session" (group into 30 buckets)
-    return Array.from({ length: 30 }, (_, i) => {
-      const bucket = Math.floor(txHistory.length * i / 30);
-      const next   = Math.floor(txHistory.length * (i + 1) / 30);
-      return next - bucket;
-    });
-  }, [txHistory]);
-
-  const totalTxCount = txHistory?.length || 0;
-  const isConnected  = !!onArc;
-
-  // Transaction heatmap from local txHistory (real session data)
+  // ── Heatmap ──────────────────────────────────────────────────────────────
   const HM = useMemo(() => {
-    const grid = Array.from({ length: 7 }, () => Array(24).fill(0));
-    if (txHistory) {
+    const g = Array.from({length:7}, () => Array(24).fill(0));
+    if (Array.isArray(txHistory)) {
       txHistory.forEach(tx => {
-        const d = new Date(tx.ts || Date.now());
-        const day = d.getDay(); // 0-6
-        const hr  = d.getHours(); // 0-23
-        grid[day][hr]++;
+        try {
+          const d = new Date(tx.ts || Date.now());
+          const day = d.getDay();
+          const hr  = d.getHours();
+          if (day >= 0 && day < 7 && hr >= 0 && hr < 24) g[day][hr]++;
+        } catch {}
       });
     }
-    return grid;
+    return g;
   }, [txHistory]);
   const hmMax = Math.max(1, ...HM.flat());
+  const totalTxCount = Array.isArray(txHistory) ? txHistory.length : 0;
+
+  // ── Safe display helpers ─────────────────────────────────────────────────
+  const fmtVol = v => { const n = Number(v); return isFinite(n) ? "$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—"; };
 
   return (
-    <div style={{ animation: "fi .3s ease" }}>
-      <PH icon="📈" title="ANALYTICS" sub="Arc Testnet protocol metrics" />
+    <div style={{ animation:"fi .3s ease" }}>
+      <PH icon="📈" title="ANALYTICS" sub="Arc Testnet protocol metrics"/>
 
-      {/* Live data status banner */}
       {isConnected ? (
-        <div style={{ background: "rgba(0,255,176,.04)", border: "1px solid rgba(0,255,176,.15)", borderRadius: 4, padding: "7px 12px", marginBottom: 8, fontSize: 9, color: "#00FFB0", fontFamily: "monospace", display: "flex", alignItems: "center", gap: 6 }}>
-          ● LIVE DATA — Arc Testnet (chainId: 5042002) · Block #{blockchainStats?.blockNum?.toLocaleString() || "…"}
-          {" · "}<a href={ARC_TESTNET.explorer} target="_blank" rel="noreferrer" style={{ color: "#00FFB0" }}>ARCScan ↗</a>
+        <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"7px 12px", marginBottom:8, fontSize:9, color:"#00FFB0", fontFamily:"monospace", display:"flex", alignItems:"center", gap:6 }}>
+          ● LIVE — Arc Testnet (chainId: 5042002) · Block #{blockchainStats?.blockNum?.toLocaleString() || "…"}
+          {" · "}<a href={ARC_TESTNET.explorer} target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>ARCScan ↗</a>
         </div>
       ) : (
-        <div style={{ background: "rgba(245,158,11,.06)", border: "1px solid rgba(245,158,11,.25)", borderRadius: 4, padding: "7px 12px", marginBottom: 8, fontSize: 9, color: "#F59E0B", fontFamily: "monospace" }}>
-          ⚠ Connect wallet to Arc Testnet to load live on-chain metrics
+        <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.25)", borderRadius:4, padding:"7px 12px", marginBottom:8, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
+          ⚠ Connect wallet to Arc Testnet to load live metrics
         </div>
       )}
 
-      {/* TVL + Tx charts */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-        {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$" + (v||0).toFixed(2), tvlUsdc)}
+      {/* Charts */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
+        {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$"+(isFinite(Number(v))?Number(v).toFixed(2):"0"), tvlUsdc)}
         <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(14,165,233,.1)", borderRadius:5, padding:"11px 13px" }}>
           <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:6 }}>LAST 24H ON-CHAIN</div>
           {[
-            { l:"TX COUNT",  v: stats24h.txCount  != null ? stats24h.txCount.toString() : "…", c:"#0EA5E9" },
-            { l:"VOLUME",    v: stats24h.volume   != null ? "$"+stats24h.volume          : "…", c:"#00FFB0" },
-            { l:"FEES",      v: stats24h.fees     != null ? "$"+stats24h.fees            : "…", c:"#fbbf24" },
-          ].map(s => (
+            { l:"TX COUNT", v:stats24h.txCount  !=null ? String(stats24h.txCount) : "…", c:"#0EA5E9" },
+            { l:"VOLUME",   v:stats24h.volume   !=null ? "$"+stats24h.volume      : "…", c:"#00FFB0" },
+            { l:"FEES",     v:stats24h.fees     !=null ? "$"+stats24h.fees        : "…", c:"#fbbf24" },
+          ].map(s=>(
             <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
               <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
               <span style={{ fontSize:10, color:s.c, fontFamily:"monospace", fontWeight:700 }}>{s.v}</span>
@@ -2688,83 +2685,72 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
         </div>
       </div>
 
-      {/* All-time protocol stats — persistent */}
+      {/* All-time fees */}
       <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(251,191,36,.12)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
           <div style={{ fontSize:8, color:"#fbbf24", letterSpacing:".14em", fontFamily:"monospace" }}>⚡ PROTOCOL FEES — ALL TIME</div>
           <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>Launch phase · 0 bps</div>
         </div>
         {[
-          { l:"Total Volume",   v: stats24h.allTimeVolume  != null ? "$"+Number(stats24h.allTimeVolume).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})  : "loading…", c:"#00FFB0" },
-          { l:"Total Tx",       v: stats24h.allTimeTxCount != null ? stats24h.allTimeTxCount.toLocaleString()                                                                         : "loading…", c:"#0EA5E9" },
-          { l:"Fees Collected", v: stats24h.allTimeFees    != null ? "$"+Number(stats24h.allTimeFees).toFixed(4)                                                                       : "loading…", c:"#fbbf24" },
-          { l:"Fee Rate",       v: "0 bps (launch phase)",                                                                                                                              c:"#64748b" },
-        ].map(s => (
+          { l:"Total Volume",   v: fmtVol(stats24h.allTimeVolume), c:"#00FFB0" },
+          { l:"Total Tx",       v: stats24h.allTimeTxCount!=null ? String(stats24h.allTimeTxCount) : "loading…", c:"#0EA5E9" },
+          { l:"Fees Collected", v: stats24h.allTimeFees!=null ? "$"+safeFmt(stats24h.allTimeFees,4) : "loading…", c:"#fbbf24" },
+          { l:"Fee Rate",       v: "0 bps (launch phase)", c:"#64748b" },
+        ].map(s=>(
           <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
             <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
             <span style={{ fontSize:9, color:s.c, fontFamily:"monospace", fontWeight:600 }}>{s.v}</span>
           </div>
         ))}
-        <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:6, lineHeight:1.5 }}>
-          Computed from ShieldVault on-chain events (deposits + swaps + sends + withdrawals + bridges).
-          Persisted locally. Fee switch activates at governance vote.
-        </div>
       </div>
 
-      {/* Real on-chain stats */}
-      <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(0,255,176,.1)", borderRadius: 5, padding: "11px 13px", marginBottom: 8 }}>
-        <div style={{ fontSize: 8, color: "#64748b", letterSpacing: ".14em", fontFamily: "monospace", marginBottom: 8 }}>ARC TESTNET STATS</div>
-        {[
-          ["Network",    "Arc Testnet — Circle L1"],
-          ["Chain ID",   "5042002"],
-          ["Gas Token",  "USDC (ERC-20 interface, 6 dec)"],
-          ["Finality",   "< 1 second (deterministic)"],
-          ["Explorer",   "testnet.arcscan.app"],
-          ["Faucet",     "faucet.circle.com (1 USDC/day)"],
-        ].map(([k, v]) => (
-          <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-            <span style={{ fontSize: 9, color: "#64748b", fontFamily: "monospace" }}>{k}</span>
-            <span style={{ fontSize: 9, color: "#94a3b8", fontFamily: "monospace", textAlign: "right", maxWidth: "60%" }}>{v}</span>
+      {/* Arc Testnet info */}
+      <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>ARC TESTNET STATS</div>
+        {[["Network","Arc Testnet — Circle L1"],["Chain ID","5042002"],["Gas Token","USDC (ERC-20, 6 dec)"],["Finality","< 1 second"],["Explorer","testnet.arcscan.app"],["Faucet","faucet.circle.com (1 USDC/day)"]].map(([k,v])=>(
+          <div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{k}</span>
+            <span style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>{v}</span>
           </div>
         ))}
       </div>
 
-      {/* Live protocol stats from ShieldVault */}
-      <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(0,255,176,.1)", borderRadius: 5, padding: "11px 13px", marginBottom: 8 }}>
-        <div style={{ fontSize: 8, color: "#64748b", letterSpacing: ".14em", fontFamily: "monospace", marginBottom: 8 }}>PRIVARC PROTOCOL — LIVE</div>
+      {/* Live protocol */}
+      <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>PRIVARC PROTOCOL — LIVE</div>
         {[
-          ["ShieldedUSDC",    tvlUsdc   != null ? "$" + tvlUsdc.toFixed(2)   : isConnected ? "loading…" : "—"],
-          ["ShieldedEURC",    tvlEurc   != null ? "€" + tvlEurc.toFixed(2)   : isConnected ? "loading…" : "—"],
-          ["ShieldedcirBTC",  tvlBtc    != null ? "₿" + tvlBtc.toFixed(6)   : isConnected ? "loading…" : "—"],
-          ["Commitments",     leafCount != null ? leafCount.toString()        : isConnected ? "loading…" : "—"],
-          ["Vault Status",    ps.depositsAllowed === true ? "ACTIVE" : ps.depositsAllowed === false ? "PAUSED" : isConnected ? "loading…" : "—"],
-          ["ZK Protocol",     "Groth16 (testnet mode)"],
-        ].map(([k, v]) => (
-          <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-            <span style={{ fontSize: 9, color: "#64748b", fontFamily: "monospace" }}>{k}</span>
-            <span style={{ fontSize: 9, color: k === "Vault Status" && v === "ACTIVE" ? "#00FFB0" : "#94a3b8", fontFamily: "monospace" }}>{v}</span>
+          ["Shielded USDC", tvlUsdc !=null ? "$"+safeFmt(tvlUsdc,2) : isConnected?"loading…":"—"],
+          ["Shielded EURC", tvlEurc !=null ? "€"+safeFmt(tvlEurc,2) : isConnected?"loading…":"—"],
+          ["Shielded cirBTC", tvlBtc !=null ? "₿"+safeFmt(tvlBtc,6) : isConnected?"loading…":"—"],
+          ["Commitments",  leafCount!=null ? String(leafCount) : isConnected?"loading…":"—"],
+          ["Vault Status", ps.depositsAllowed===true?"ACTIVE":ps.depositsAllowed===false?"PAUSED":isConnected?"loading…":"—"],
+          ["ZK Protocol",  "Groth16 (testnet mode)"],
+        ].map(([k,v])=>(
+          <div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{k}</span>
+            <span style={{ fontSize:9, color:k==="Vault Status"&&v==="ACTIVE"?"#00FFB0":"#94a3b8", fontFamily:"monospace" }}>{v}</span>
           </div>
         ))}
       </div>
 
-      {/* Heatmap from real session tx */}
-      <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(0,255,176,.1)", borderRadius: 5, padding: "11px 13px" }}>
-        <div style={{ fontSize: 7, color: "#64748b", letterSpacing: ".15em", fontFamily: "monospace", marginBottom: 8 }}>
-          SESSION TX HEATMAP — 7 DAYS × 24H {totalTxCount === 0 && "(no transactions yet)"}
+      {/* Heatmap */}
+      <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px" }}>
+        <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:8 }}>
+          SESSION TX HEATMAP — 7 DAYS × 24H {totalTxCount===0&&"(no transactions yet)"}
         </div>
-        <div style={{ display: "flex", gap: 2 }}>
-          {Array.from({ length: 24 }, (_, col) =>
-            <div key={col} style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
-              {Array.from({ length: 7 }, (_, row) =>
-                <div key={row} style={{ height: 10, borderRadius: 2, background: `rgba(0,255,176,${HM[row][col] / hmMax * .7 + .05})` }} />
-              )}
+        <div style={{ display:"flex", gap:2 }}>
+          {Array.from({length:24},(_,col)=>(
+            <div key={col} style={{ display:"flex", flexDirection:"column", gap:2, flex:1 }}>
+              {Array.from({length:7},(_,row)=>(
+                <div key={row} style={{ height:10, borderRadius:2, background:`rgba(0,255,176,${(HM[row]?.[col]||0)/hmMax*.7+.05})` }}/>
+              ))}
             </div>
-          )}
+          ))}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
-          <span style={{ fontSize: 7, color: "#334155", fontFamily: "monospace" }}>00:00</span>
-          <span style={{ fontSize: 7, color: "#334155", fontFamily: "monospace" }}>12:00</span>
-          <span style={{ fontSize: 7, color: "#334155", fontFamily: "monospace" }}>23:00</span>
+        <div style={{ display:"flex", justifyContent:"space-between", marginTop:5 }}>
+          <span style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>00:00</span>
+          <span style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>12:00</span>
+          <span style={{ fontSize:7, color:"#334155", fontFamily:"monospace" }}>23:00</span>
         </div>
       </div>
     </div>
