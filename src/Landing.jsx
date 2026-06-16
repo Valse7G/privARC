@@ -551,7 +551,7 @@ export function Landing({ navigate }) {
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
             <div style={{ width: 22, height: 22, border: "1px solid rgba(0,255,176,.4)", borderRadius: 2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#00FFB0" }}>◈</div>
             <span style={{ fontSize: 12, fontWeight: 700, color: "#00FFB0", fontFamily: "'Syne', sans-serif" }}>privARC</span>
-            <span style={{ fontSize: 9, color: "#334155", letterSpacing: ".1em" }}>OS v3.0.0</span>
+            <span style={{ fontSize: 9, color: "#334155", letterSpacing: ".1em" }}>OS v12.0.0</span>
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             {[["Docs", "#"], ["Security", "#"], ["GitHub", "#"], ["ARCScan", "https://testnet.arcscan.app"], ["Faucet", "https://faucet.circle.com"]].map(([label, href]) => (

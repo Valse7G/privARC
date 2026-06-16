@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  PrivARC OS — Contract Config v3.1.0
+//  PrivARC OS — Contract Config v12.0.0
 //
-//  Addresses synced with latest.json v2.3.0 — Arc Testnet — 2026-06-09
+//  Addresses synced with latest.json v2.3.0 — Arc Testnet — 2026-06-15
 //  Deployer: 0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894
 //
 //  ADDRESSES: sourced from VITE_ env vars (Vercel) or hardcoded fallbacks
@@ -11,19 +11,19 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x9D90f31a7E848A9b23Bc74f29ec6DDD49fAd2eed",
-  Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x610Ac4c608BDa6d7a7c9EE92E80E636dA693C9C1",
-  Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0xd90450f078B0ae9a2bcb6fC9ce91bbB577761aaa",
-  Staking:             import.meta.env.VITE_STAKING               ?? "0x7020421318F41F9A11Ba25a19Ee59Da652a775Cf",
-  NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0xFA80cB08e92323ABb6110d2A5E3f0CBa228BFFc2",
-  MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x5Ab317C4bb24a2CD3Fa79Fe85AfA52C4A32462B0",
-  DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0x3f59AC80EA087cC08D85c40aA29335ed57E64032",
-  WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0x15244f75dE6221D3E290740dEd52Ec3217C8EC5D",
-  ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0xbBf614Dd567A98d8879b68Ebc3b9F34aC8732CF6",
-  PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0xa091603CfDDf533937aB68DF55E9295F9aAd38d1",
-  PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0x7f7688BD2a53B653C670A0552d8674a909Bd3d9F",
-  EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0x7eCAfef63ad0a2Fb3734843AeeF275ACDC216b1F",
-  MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0xF9cC4B19d76709ec33087224f876c4834978f3AD",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xDC920361131AddeC15A04070052169E941ae8D02",
+  Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
+  Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
+  Staking:             import.meta.env.VITE_STAKING               ?? "0x80C8247e602D78da93f318862B3d14026Be03505",
+  NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0xAbaADa4ac464f4D9f9195a874c9121FC0A53b212",
+  MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x175C61212679376F0c210C1a5c4aC3A5E87fB372",
+  DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xdd31d70c2Ce1B5b33Fe016569FEF99CeC8cAE34D",
+  WithdrawalManager:   import.meta.env.VITE_WITHDRAWAL_MANAGER    ?? "0x1b81a4d05851C423B81344Abe5693428e3914250",
+  ShieldedTransfer:    import.meta.env.VITE_SHIELDED_TRANSFER     ?? "0xa880603916611a0e624f9A04c7f08b62f0532543",
+  PrivateSwap:         import.meta.env.VITE_PRIVATE_SWAP          ?? "0xd16F252FFc0a406dFcF58eBAF7EA49f9e1DF78Eb",
+  PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0x1C22eEb6c422BeF73B335e1E5668ec3109839B40",
+  EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0xa788E96DcF4dBf348995bc5b8D0C7BbaD8e5e88F",
+  MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0x83a34C5997c58c36A60855879ae24CC440430181",
 };
 
 export const CONTRACTS = {
@@ -140,6 +140,7 @@ export const SEL = {
   deposit:            "0xbd673975",  // deposit((bytes32,address,uint256,(uint256[2],uint256[2][2],uint256[2]),uint256[]))
   withdraw:           "0x3dd75908",  // withdraw(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,address,address,uint256,uint256,address,uint256[]))
   shieldedSend:       "0x5635a2e7",  // shieldedSend((bytes32[],(uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32[],uint256[]))
+  shieldedSendWithNote:"0xd3c9406f", // shieldedSendWithNote(TransferParams,address,bytes,bytes) — ECIES stealth note
   privateSwapExec:    "0x49fa2a6e",  // privateSwapExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,bytes32,address,address,uint256,uint256,uint256,address,bytes,uint256[]))
   privateBridgeExec:  "0x8fa6444e",  // privateBridgeExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,uint32,address,uint256,bytes32,uint256,uint256[]))
 
@@ -169,7 +170,12 @@ export const SEL = {
   unstake:            "0x2e17de78",  // unstake(uint256)
   claimRewards:       "0x372500ab",  // claimRewards()
   previewRewards:     "0xf166e920",  // previewRewards(address)
-  previewRewards:     "0xf166e920",  // previewRewards(address)
+
+  // Protocol fees (ShieldVault v2.3.1)
+  feesCollectedByToken: "0xa2c169a7",  // feesCollectedByToken(address)
+  withdrawFees:         "0x164e68de",  // withdrawFees(address)
+  protocolFeeBps:       "0x35659fb8",  // protocolFeeBps()
+  treasury:             "0x61d027b3",  // treasury()
 };
 
 // ── ABI encoding primitives ───────────────────────────────────────────────────

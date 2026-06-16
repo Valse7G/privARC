@@ -1,102 +1,200 @@
-# PrivARC OS — Frontend v10.10.0
+# PrivARC OS — v11.1.0
 
-ZK privacy protocol interface built on Arc Testnet (Circle L1, USDC native gas).
+Confidential on-chain capital management built on **Arc Testnet** (Circle L1, USDC native gas).  
+Aligned with the [Arc Privacy Sector whitepaper](https://www.arc.io/privacy-whitepaper) — **Governed Visibility**, not anonymity.
 
-## Deployed addresses — Arc Testnet (latest.json v2.3.0 — 2026-06-09)
+---
+
+## Deployed contracts — Arc Testnet (v2.3.1 — 2026-06-15)
 
 | Contract            | Address                                      |
 |---------------------|----------------------------------------------|
-| USDC                | `0x3600000000000000000000000000000000000000` |
+| USDC (native)       | `0x3600000000000000000000000000000000000000` |
 | EURC                | `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a` |
 | cirBTC              | `0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF` |
 | CCTP_TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
-| Timelock            | `0x610Ac4c608BDa6d7a7c9EE92E80E636dA693C9C1` |
-| Governance          | `0xd90450f078B0ae9a2bcb6fC9ce91bbB577761aaa` |
-| Staking             | `0x7020421318F41F9A11Ba25a19Ee59Da652a775Cf` |
-| MockVerifierZK      | `0xF9cC4B19d76709ec33087224f876c4834978f3AD` |
-| NullifierRegistry   | `0xFA80cB08e92323ABb6110d2A5E3f0CBa228BFFc2` |
-| MerkleTreeManager   | `0x5Ab317C4bb24a2CD3Fa79Fe85AfA52C4A32462B0` |
-| DepositManager      | `0x3f59AC80EA087cC08D85c40aA29335ed57E64032` |
-| WithdrawalManager   | `0x15244f75dE6221D3E290740dEd52Ec3217C8EC5D` |
-| ShieldedTransfer    | `0xbBf614Dd567A98d8879b68Ebc3b9F34aC8732CF6` |
-| PrivateSwap         | `0xa091603CfDDf533937aB68DF55E9295F9aAd38d1` |
-| PrivateBridge       | `0x7f7688BD2a53B653C670A0552d8674a909Bd3d9F` |
-| EmergencyController | `0x7eCAfef63ad0a2Fb3734843AeeF275ACDC216b1F` |
-| ShieldVault         | `0x9D90f31a7E848A9b23Bc74f29ec6DDD49fAd2eed` |
+| Timelock            | `0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99` |
+| Governance          | `0x89F08E2BBc963e48986D8A0FfA23858bA643C78A` |
+| Staking             | `0x80C8247e602D78da93f318862B3d14026Be03505` |
+| MockVerifierZK      | `0x83a34C5997c58c36A60855879ae24CC440430181` |
+| NullifierRegistry   | `0xAbaADa4ac464f4D9f9195a874c9121FC0A53b212` |
+| MerkleTreeManager   | `0x175C61212679376F0c210C1a5c4aC3A5E87fB372` |
+| DepositManager      | `0xdd31d70c2Ce1B5b33Fe016569FEF99CeC8cAE34D` |
+| WithdrawalManager   | `0x1b81a4d05851C423B81344Abe5693428e3914250` |
+| ShieldedTransfer    | `0xa880603916611a0e624f9A04c7f08b62f0532543` |
+| PrivateSwap         | `0xd16F252FFc0a406dFcF58eBAF7EA49f9e1DF78Eb` |
+| PrivateBridge       | `0x1C22eEb6c422BeF73B335e1E5668ec3109839B40` |
+| EmergencyController | `0xa788E96DcF4dBf348995bc5b8D0C7BbaD8e5e88F` |
+| ShieldVault         | `0xDC920361131AddeC15A04070052169E941ae8D02` |
 
-Deployer: `0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894`
+Deployer / treasury: `0x1Dc72450B3e2782AcD669D7C27073f2C8F2c9894`
+
+---
 
 ## Network
 
-| Field    | Value                          |
-|----------|-------------------------------|
-| Chain ID | 5042002                        |
-| Gas token | USDC (ERC-20, 6 dec)          |
-| RPC      | https://rpc.testnet.arc.network |
-| Explorer | https://testnet.arcscan.app    |
-| Faucet   | https://faucet.circle.com      |
+| Field     | Value                             |
+|-----------|-----------------------------------|
+| Chain ID  | 5042002                           |
+| Gas token | USDC (ERC-20, 6 dec)              |
+| RPC       | https://rpc.testnet.arc.network   |
+| Explorer  | https://testnet.arcscan.app       |
+| Faucet    | https://faucet.circle.com (1 USDC/day) |
 
-## Features
+---
 
-| Panel      | Status | Notes |
-|------------|--------|-------|
-| Shield     | ✅ | Deposit USDC/EURC/cirBTC into ShieldVault |
-| Withdraw   | ✅ | Exit shielded pool → public address |
-| Shielded Send | ✅ | Private ZK transfer, receipt copied to clipboard |
-| Public Send | ✅ | Direct USDC transfer, visible on ARCScan |
-| Private Swap | ✅ | USDC ↔ EURC via ShieldVault (testnet: no DEX router) |
-| Bridge     | ⚠️ | ZK tx executes; CCTP cross-chain delivery pending Arc Testnet CCTP launch |
-| Portfolio  | ✅ | Live USDC + EURC + cirBTC balances + shielded notes |
-| Staking    | ✅ | Stake USDC (7/30/90/180d lock), view positions, claim rewards |
-| Analytics  | ✅ | Live 24h on-chain stats via eth_getLogs (30s refresh) |
-| Tx History | ✅ | Persistent across sessions (localStorage) |
+## Feature status
 
-## Changelog
+| Panel             | Status | Notes |
+|-------------------|--------|-------|
+| Shield            | ✅ | Deposit USDC/EURC/cirBTC — 0.03 USDC protocol fee per deposit |
+| Withdraw          | ✅ | Unshield to any public address — governed visibility |
+| Confidential Send | ✅ | Shielded ZK transfer — receipt copied to clipboard |
+| Public Send       | ✅ | Direct USDC transfer |
+| Confidential Swap | ✅ | Arc StableFX (USDC↔EURC↔USYC) + Uniswap routing (pending Arc deployment) |
+| Bridge            | ✅ | Circle App Kit + CCTP v2 — recipient governed visibility |
+| Portfolio         | ✅ | Live USDC + EURC + cirBTC balances + shielded notes |
+| Staking           | ✅ | 7/30/90/180d lock, positions per wallet, claim rewards |
+| Analytics         | ✅ | Live TVL + 24h stats + protocol fees (eth_getLogs + contract reads, 30s refresh) |
+| Tx History        | ✅ | Persistent per wallet (localStorage keyed by address) |
+| Shielded Wallet   | ✅ | Per-wallet notes, on-chain deposit reconciliation, singleton at root |
 
-### v10.10.0
-- **Tx History**: persistent in localStorage, survives page refresh
-- **Portfolio**: live EURC + cirBTC balances via `balanceOf()` on-chain + total USD
-- **Portfolio**: shielded notes breakdown (USDC/EURC/cirBTC) + export report
-- **Staking**: read `previewRewards()` + protocol TVL on-chain every 15s; positions stored per wallet; unlock countdown; UNSTAKE button per position; MAX button wired to available USDC balance
-- **Shielded Send**: generates shareable `privarc://note/<base64>` receipt, auto-copied to clipboard
-- **Analytics**: 24h TX count + volume via `eth_getLogs` on ShieldVault, refreshed every 30s
-- **Swap**: fixed `minAmountOut` BigInt calculation
-- **Bridge**: restored note lookup, explicit CCTP testnet limitation notice
+---
 
-### v10.9.0
-- ShieldedWallet component: per-token shielded balances in all panels
-- useShieldedBalances hook aggregates notes with USD total
+## Protocol fees (v2.3.1)
 
-### v10.8.0
-- TxConfirmModal: shows real amount before wallet prompt (ERC-20 + ZK txs show value=0)
-- Note storage notification simplified
+- **0.03 USDC** fixed fee per deposit, collected by `ShieldVault.feesCollectedByToken`
+- Claimable by deployer or treasury via `ShieldVault.withdrawFees(token)`
+- Visible in real-time in Analytics → Protocol Fees panel
+- Fee rate can be updated by governance (max 1%)
 
-### v10.7.0
-- **Root fix**: ABI encoding `publicInputs` offset incorrect in deposit/withdraw/swap
-  - `buildDepositCalldata`: dynOff `0x160` → `0x180`
-  - `buildWithdrawCalldata`: dynOff `0x1e0` → `0x200`
-  - `buildPrivateSwapCalldata`: removed extra +32 word
+---
 
-### v10.5.0
-- All 17 contract addresses updated from latest.json v2.3.0
-- EURC and cirBTC activated (real addresses deployed)
+## Privacy model — Arc Privacy Sector aligned
+
+PrivARC implements **Governed Visibility** as defined in the Arc Privacy Sector whitepaper:
+
+| Layer | What's visible | What's private |
+|-------|---------------|----------------|
+| Deposit | Amount + ShieldVault address | Depositor link to withdrawal |
+| Shielded Send | Merkle root update | Sender, recipient, amount |
+| Withdraw | Amount + recipient | Link to original deposit |
+| Bridge | Amount + destination chain | Recipient address |
+
+EIP-712 authorized view keys planned for Q4 2026 (see roadmap).
+
+---
 
 ## Architecture
 
 ```
 src/
-  contracts.js   — addresses, selectors, ABI calldata builders
-  DApp.jsx       — full DApp (panels, hooks, wallet integration)
-  App.jsx        — router (Landing ↔ DApp)
-  Landing.jsx    — marketing page
+  contracts.js   — addresses, ABI selectors, calldata builders
+  DApp.jsx       — full DApp (~3400 lines): panels, hooks, wallet integration
+  App.jsx        — router (Landing ↔ DApp) + ErrorBoundary
+  Landing.jsx    — marketing / landing page
 ```
+
+### Key hooks
+| Hook | Purpose |
+|------|---------|
+| `useShieldedBalances(prices, address)` | Wallet-scoped notes + on-chain reconciliation |
+| `useProtocolStats(onArc)` | Live TVL, commitments, vault status (10s poll) |
+| `useTxSend(...)` | Sends tx, waits receipt, updates persisted txHistory |
+
+### Data isolation per wallet
+All localStorage keys are scoped by address:
+- `privarc_notes_{address}` — shielded notes
+- `privarc_txhistory_{address}` — tx history
+- `privarc_stakes_{address}` — staking positions
+- `privarc_protocol_fees` — global (protocol-wide)
+
+---
+
+## Swap routing
+
+| Route | Status | Pairs |
+|-------|--------|-------|
+| Arc StableFX | ✅ Live (testnet: address(0)) | USDC / EURC / USYC |
+| Uniswap V3   | ⏳ Pending Arc deployment | All ERC-20 pairs |
+
+Addresses will be updated in `contracts.js` when Circle/Arc publishes them.
+
+---
+
+## Bridge
+
+Powered by **Circle App Kit** + **CCTP v2**.
+- [Circle CCTP docs](https://developers.circle.com/stablecoins/cctp-getting-started)
+- [Circle App Kit](https://developers.circle.com/w3s/circle-app-kit)
+- Arc Testnet: CCTP attestation pending mainnet activation
+
+---
 
 ## Quick start
 
 ```bash
 npm install
 npm run dev        # local dev
-npm run build      # production build
+npm run build      # production build (no env vars required)
 ```
 
-Deploy on Vercel — no env vars required (fallback addresses built-in).
+Deploy on Vercel — fallback addresses built-in, no env vars required.
+
+---
+
+## Contracts — deploy / fix
+
+```bash
+cd privarc-contracts-v2
+cp .env.example .env   # add DEPLOYER_PRIVATE_KEY
+
+npm run deploy:testnet  # full redeploy
+npm run fix:testnet     # add missing tokens without redeploy
+npm run verify          # register on ARCScan
+```
+
+---
+
+## Changelog
+
+### v12.0.0
+- **ECIES Stealth Notes**: encrypted note embedded in `shieldedSendWithNote` tx — recipient auto-decrypts on wallet connect
+- **Arc StableFX swap route** + Uniswap V3 placeholder (pending Arc deployment)
+- **Circle App Kit + CCTP v2** bridge banner with docs links
+- **Protocol fees**: 0.03 USDC/deposit, live read from `feesCollectedByToken`, `withdrawFees()` for treasury
+- **Analytics**: fees read directly from contract state (not getLogs fromBlock:0x0), 30s refresh
+- **13 new contract addresses** (Arc Testnet deployment 2026-06-15)
+- All version strings updated to v12.0.0
+
+### v11.1.0
+- **Protocol fees**: 0.03 USDC/deposit collected on-chain (`feesCollectedByToken`)
+- **ShieldVault.withdrawFees(token)**: deployer/treasury can claim fees
+- **Analytics**: fees read directly from contract state (not getLogs), 30s refresh, live breakdown USDC/EURC
+- **Swap**: Arc StableFX route selector + Uniswap V3 placeholder (pending Arc)
+- **Bridge**: Circle App Kit + CCTP v2 banner with docs links
+
+### v11.0.0
+- AnalyticsPanel: full defensive rewrite — all NaN/undefined crashes eliminated
+- Protocol Fees section: all-time volume + tx count + fees (persistent + live)
+- BigInt float-string crash fixed in `useShieldedBalances`
+- WithdrawPanel/BridgePanel: `notes.length` → `bals.noteCount` (undefined fix)
+
+### v10.14.0
+- Arc Privacy Sector whitepaper alignment — "Governed Visibility" terminology
+- Roadmap updated with Arc Private EVM milestones
+
+### v10.13.0
+- Wallet-scoped notes/txHistory (isolation per address)
+- On-chain deposit reconciliation via eth_getLogs at connect
+
+### v10.12.0
+- ShieldedWallet singleton (no flash on panel navigation)
+- All technical leakage removed from UI
+
+### v10.11.0
+- Staking: buildStakeCalldata accepts seconds directly (was doubling duration)
+- ErrorBoundary in App.jsx (black screen prevention)
+
+### v10.7.0
+- ABI encoding fix: publicInputs offset — deposit/withdraw/swap calldatas
