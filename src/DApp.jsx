@@ -2383,7 +2383,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
           </div>
         ))}
       </div>}
-      <ArcBtn label={onArc?`⟶ SWAP VIA ${activeRoute.label.toUpperCase()}`:""⚠ SWITCH TO ARC TESTNET"} onClick={onArc?swap:undefined} loading={loading} disabled={!onArc||!amount||!q} color={onArc?"#00FFB0":"#F59E0B"}/>
+      <ArcBtn label={onArc?`⟶ SWAP VIA ${activeRoute.label.toUpperCase()}`:"⚠ SWITCH TO ARC TESTNET"} onClick={onArc?swap:undefined} loading={loading} disabled={!onArc||!amount||!q} color={onArc?"#00FFB0":"#F59E0B"}/>
     </div>
   );
 }
