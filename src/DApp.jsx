@@ -2477,7 +2477,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       const transferData = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut });
       // Build shieldedSendWithNote calldata:
       // selector(4) + TransferParams(dynamic) + address(32) + bytes encryptedNote(dynamic) + bytes ephemeralPubKey(dynamic)
-      const xferHex  = (transferData.data || "").slice(10); // strip "0x" + 4-byte selector (was slice(2) — left selector bytes glued to struct, shifting every offset)
+      const xferHex  = (transferData.data || "").slice(74); // strip "0x" + selector + buildShieldedSendCalldata's own leading self-offset word (only valid when TransferParams is the sole param — here it's nested as arg0 of 4, so that word must go too)
       const destPad  = dest.replace("0x","").padStart(64,"0").toLowerCase();
       const encBytes = hexToBytes(encryptedNote);
       const ephBytes = hexToBytes(ephemeralPubKey);
