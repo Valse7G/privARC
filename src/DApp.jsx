@@ -742,11 +742,9 @@ const SIDX = [
   { label:"Withdraw",          panel:"withdraw",   icon:"↙",  desc:"Exit to public address" },
   { label:"Bridge",            panel:"bridge",     icon:"⟺", desc:"Cross-chain transfer" },
   { label:"Analytics",         panel:"analytics",  icon:"📈", desc:"TVL, charts, heatmaps" },
-  { label:"ZK Proof Console",  panel:"zk",         icon:"🔐", desc:"Groth16 & PLONK proofs" },
-  { label:"Governance",        panel:"governance", icon:"🗳", desc:"Vote on proposals" },
+  { label:"Governance",        panel:"governance", icon:"🗳", desc:"Protocol parameters & on-chain voting" },
   { label:"Staking & Rewards", panel:"staking",    icon:"💎", desc:"Stake USDC, earn yield" },
   { label:"Portfolio",         panel:"portfolio",  icon:"📊", desc:"Asset allocation" },
-  { label:"AI Agents",         panel:"agents",     icon:"🤖", desc:"8 autonomous agents" },
   { label:"History",           panel:"history",    icon:"📋", desc:"Transaction log" },
   { label:"Settings",          panel:"settings",   icon:"⚙",  desc:"Network configuration" },
 ];
@@ -1031,7 +1029,7 @@ function AuthScreen({ onAuth }) {
             <span style={{ fontSize:9, color:"#4a7c5f", fontFamily:"monospace", letterSpacing:".12em", alignSelf:"flex-end", paddingBottom:2 }}>OS</span>
           </div>
           <p style={{ fontSize:11, color:"#94a3b8", fontFamily:"monospace", letterSpacing:".04em", lineHeight:1.6 }}>
-            Autonomous crypto OS · Private on-chain capital<br/>8 AI agents · Arc Testnet (Circle L1)
+            Confidential capital OS · Private on-chain capital<br/>Arc Testnet (Circle L1)
           </p>
         </div>
 
@@ -1167,13 +1165,6 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   const [showNotif, setShowNotif]   = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showDisc, setShowDisc]     = useState(false);
-  const [agentLogs, setAgentLogs]   = useState([
-    { t:"00:00:01", m:`ShieldAgent v2 :: ShieldVault @ ${CONTRACTS.ShieldVault.slice(0,10)}...`, c:"#00FFB0" },
-    { t:"00:00:02", m:`ShieldAgent v2 :: Multi-token: USDC, EURC, cirBTC`, c:"#00FFB0" },
-    { t:"00:00:03", m:"ZKAgent :: Privacy circuits initialized — testnet mode", c:"#4ade80" },
-    { t:"00:00:07", m:"RiskAgent :: EmergencyController threshold: 100,000 USDC", c:"#4ade80" },
-    { t:"00:00:12", m:`FeeAgent :: USDC gas oracle — ${ARC_TESTNET.rpcUrl}`, c:"#4ade80" },
-  ]);
   const unread = notifs.filter(n=>!n.read).length;
 
   // Fetch real block number from Arc Testnet
@@ -1186,28 +1177,6 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     };
     if (onArc) { fetchBlock(); const id = setInterval(fetchBlock, 6000); return ()=>clearInterval(id); }
   }, [onArc]);
-
-  // Agent log ticker
-  useEffect(() => {
-    const MSGS = [
-      ["ZKAgent :: Proof generated — Arc Testnet","#00FFB0"],
-      ["ShieldAgent :: Vault pool depth nominal","#4ade80"],
-      ["FeeAgent :: USDC gas price updated","#4ade80"],
-      ["PrivacyAgent :: Stealth scan — 0 new notes","#4ade80"],
-      ["RiskAgent :: No anomaly detected","#4ade80"],
-      ["SwapAgent :: Route refreshed — Arc Testnet DEX","#4ade80"],
-      ["BridgeAgent :: CCTP bridge idle","#64748b"],
-      ["GovAgent :: No pending proposals","#64748b"],
-    ];
-    const id = setInterval(() => {
-      if (Math.random() > .5) {
-        const [m, c] = MSGS[Math.floor(Math.random()*MSGS.length)];
-        setAgentLogs(p => [...p.slice(-8), { t: tc(), m, c }]);
-        if (Math.random() > .8) push(m, "info");
-      }
-    }, 3000);
-    return () => clearInterval(id);
-  }, [push]);
 
   // Keyboard shortcut
   useEffect(() => {
@@ -1250,12 +1219,10 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     { id:"bridge",     icon:"⟺", label:"Bridge" },
     null,
     { id:"analytics",  icon:"📈", label:"Analytics" },
-    { id:"zk",         icon:"🔐", label:"ZK Console" },
     { id:"governance", icon:"🗳", label:"Governance" },
     { id:"staking",    icon:"💎", label:"Staking" },
     null,
     { id:"portfolio",  icon:"📊", label:"Portfolio" },
-    { id:"agents",     icon:"🤖", label:"Agents" },
     { id:"history",    icon:"📋", label:"History" },
     { id:"settings",   icon:"⚙",  label:"Settings" },
   ];
@@ -1283,7 +1250,6 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
           const merged = [...current, ...old.filter(n => !existingSet.has(n.commitment))];
           saveNotes(account.address, merged);
           localStorage.removeItem(legacyKey);
-          console.log(`[PrivARC] Migrated ${old.length} legacy notes → ${notesKey(account.address)}`);
         }
       } catch {}
     }
@@ -1302,7 +1268,7 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     return () => clearInterval(id);
   }, [account?.address, onArc, recomputeShielded]);
 
-  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, agentLogs, setPanel, protocolStats, shieldedBals, recomputeShielded };
+  const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, setPanel, protocolStats, shieldedBals, recomputeShielded };
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -1381,11 +1347,9 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
           {panel==="withdraw"   && <WithdrawPanel   {...panelProps}/>}
           {panel==="bridge"     && <BridgePanel     {...panelProps}/>}
           {panel==="analytics"  && <AnalyticsPanel  {...panelProps}/>}
-          {panel==="zk"         && <ZKPanel         {...panelProps}/>}
           {panel==="governance" && <GovPanel        {...panelProps}/>}
           {panel==="staking"    && <StakingPanel    {...panelProps}/>}
           {panel==="portfolio"  && <PortfolioPanel  {...panelProps}/>}
-          {panel==="agents"     && <AgentsPanel     {...panelProps}/>}
           {panel==="history"    && <HistoryPanel    {...panelProps}/>}
           {panel==="settings"   && <SettingsPanel   {...panelProps}/>}
         </div>
@@ -1414,7 +1378,7 @@ function NotOnArcWarning() {
   );
 }
 
-function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, setPanel, prices, changes, change24h, lastUpdate, priceError, refreshBalance }) {
+function OverviewPanel({ account, usdcBalance, loadingBal, onArc, setPanel, prices, changes, change24h, lastUpdate, priceError, refreshBalance }) {
   return (
     <div style={{ animation:"fi .3s ease" }}>
       <div style={{ fontSize:9, color:"#4a7c5f", letterSpacing:".2em", fontFamily:"monospace", marginBottom:14 }}>◈ SYSTEM OVERVIEW — ARC TESTNET</div>
@@ -1509,7 +1473,7 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, set
       </div>
 
       {/* Faucet reminder */}
-      <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"10px 13px", marginBottom:14 }}>
+      <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"10px 13px" }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div>
             <div style={{ fontSize:9, color:"#0EA5E9", fontFamily:"monospace", fontWeight:700, marginBottom:2 }}>💧 NEED TESTNET USDC?</div>
@@ -1521,20 +1485,6 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, agentLogs, set
             GET USDC ↗
           </a>
         </div>
-      </div>
-
-      {/* Agent log */}
-      <div style={{ background:"rgba(0,0,0,.5)", border:"1px solid rgba(0,255,176,.08)", borderRadius:4, padding:"9px 12px" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-          <div style={{ fontSize:8, color:"#4a7c5f", letterSpacing:".2em", fontFamily:"monospace" }}>AI AGENT LOG</div>
-          <button onClick={()=>setPanel("agents")} style={{ fontSize:8, color:"#64748b", background:"none", border:"none", cursor:"pointer", fontFamily:"monospace", transition:"color .2s" }}
-            onMouseEnter={e=>e.target.style.color="#00FFB0"} onMouseLeave={e=>e.target.style.color="#64748b"}>VIEW ALL →</button>
-        </div>
-        {agentLogs.slice(-3).map((l,i)=>(
-          <div key={i} style={{ fontSize:9, fontFamily:"monospace", marginBottom:2, color:l.c, lineHeight:1.4 }}>
-            <span style={{ color:"#1e3a2a", marginRight:7 }}>[{l.t}]</span>{l.m}
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -1797,7 +1747,6 @@ async function scanStealthNotes(address, recompute) {
     if (added > 0) {
       saveNotes(address, existing);
       recompute?.();
-      console.log(`[PrivARC] Decrypted ${added} stealth note(s) for ${address.slice(0,8)}…`);
     }
   } catch(e) { console.warn("[PrivARC stealth scan]", e.message); }
 }
@@ -1865,7 +1814,6 @@ async function reconcileNotesOnChain(address) {
 
     if (added > 0) {
       saveNotes(address, existing);
-      console.log(`[PrivARC] Reconciled ${added} on-chain deposit(s) for ${address.slice(0,8)}…`);
     }
   } catch (e) {
     console.warn("[PrivARC] On-chain reconciliation failed:", e.message);
@@ -2390,7 +2338,6 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
 
 function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
-  const [resolving, setResolving]=useState(false); const [resolved, setResolved]=useState(null);
   const [mode, setMode]=useState("shielded");
   const [confirmTx, setConfirmTx] = useState(null);
   const confirmRef = useRef(null);
@@ -2400,17 +2347,14 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
 
-  useEffect(()=>{
-    if(to.endsWith(".arc")){
-      setResolving(true);setResolved(null);
-      const id=setTimeout(()=>{setResolving(false);setResolved("0x"+hx(40));},700);
-      return()=>clearTimeout(id);
-    } else setResolved(null);
-  },[to]);
+  // NOTE: ARC Name Service (.arc) is not yet deployed — there is no on-chain
+  // registry to resolve names against. Only raw 0x addresses are accepted.
+  const isArcName = to.trim().toLowerCase().endsWith(".arc");
 
   const sendShielded = async () => {
     if (!amount || Number(amount) <= 0) return;
-    const dest = resolved || to;
+    const dest = to.trim();
+    if (isArcName) { notify("Send", "ARC Name Service is not live yet — enter a 0x address directly.", "error"); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(dest)) { notify("Send", "Invalid address format", "error"); return; }
     setLoading(true);
 
@@ -2546,17 +2490,18 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       }
     }
 
-    setTo(""); setAmount(""); setResolved(null); setLoading(false);
+    setTo(""); setAmount(""); setLoading(false);
   };
 
   const sendPublic = async () => {
     if (!amount) return;
-    const dest = resolved || to;
+    const dest = to.trim();
+    if (isArcName) { notify("Send", "ARC Name Service is not live yet — enter a 0x address directly.", "error"); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(dest)) { notify("Send", "Invalid address format", "error"); return; }
     setLoading(true);
     const amountHex = "0x" + (BigInt(Math.round(Number(amount)*1e6)) * NATIVE_TO_ERC20_SHIFT).toString(16);
     await sendRealTx({ label:"Public Send", description:`${amount} USDC → ${sh(dest)} (public)`, buildTx:()=>({ to:dest, value:amountHex, data:"0x" }) });
-    setTo(""); setAmount(""); setResolved(null); setLoading(false);
+    setTo(""); setAmount(""); setLoading(false);
   };
 
   return (
@@ -2583,13 +2528,13 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
             ⚠ Public transfer — fully visible on-chain. Use Confidential Send to shield this transaction.
           </div>
       }
-      <OsField label="RECIPIENT (0x... or name.arc)" value={to} onChange={e=>setTo(e.target.value)} placeholder="0x... or name.arc" icon="↗" hint={resolving?"Resolving...":resolved?`✓ Resolved: ${sh(resolved)}`:null}/>
+      <OsField label="RECIPIENT (0x address)" value={to} onChange={e=>setTo(e.target.value)} placeholder="0x..." icon="↗" hint={isArcName?"⚠ ARC Name Service not live yet — use a 0x address":null}/>
       <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="💸" suffix="USDC"/>
       <IG items={[["Privacy",mode==="shielded"?"✓ Hidden":"✗ Public",""],["Route",mode==="shielded"?"ShieldVault":"Direct",""],["Gas","USDC","Arc Testnet"]]}/>
       <ArcBtn
         label={!onArc?"⚠ SWITCH TO ARC TESTNET":mode==="shielded"?"⟶ SHIELDED SEND":"⟶ PUBLIC SEND"}
         onClick={onArc?(mode==="shielded"?sendShielded:sendPublic):undefined}
-        loading={loading} disabled={!onArc||!to||!amount||resolving}
+        loading={loading} disabled={!onArc||!to||!amount||isArcName}
         color={!onArc?"#F59E0B":mode==="shielded"?"#00FFB0":"#F59E0B"}
       />
     </div>
@@ -3123,129 +3068,46 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
   );
 }
 
-function ZKPanel({ account, onArc, notify }) {
-  const [mode,setMode]=useState("groth16"); const [circuit,setCircuit]=useState("shield"); const [proving,setProving]=useState(false); const [phase,setPhase]=useState(0); const [proof,setProof]=useState(null); const [verified,setVerified]=useState(null); const [verifying,setVerifying]=useState(false); const [history,setHistory]=useState([]);
-  const CIRCS={shield:{name:"ShieldCircuit",constraints:28341,time:1.82},transfer:{name:"TransferCircuit",constraints:42815,time:2.41},withdraw:{name:"WithdrawCircuit",constraints:35490,time:2.12}};
-  const C=CIRCS[circuit];
-  const STEPS=mode==="groth16"?["Compiling constraints...","Generating witness vector...","Computing FFT on proving key...","Evaluating QAP polynomials...","Computing π_A, π_B, π_C...","Serializing Groth16 proof...","PROOF COMPLETE"]:["Init PLONK prover...","Computing permutation argument...","Building gate constraints...","Multilinear extension evaluations...","Commitment scheme (KZG)...","Finalizing PLONK proof...","PROOF COMPLETE"];
-
-  const run=async()=>{
-    if(!onArc){notify("ZK Proof","Switch to Arc Testnet first","error");return;}
-    setProving(true);setPhase(0);setProof(null);setVerified(null);
-    for(let i=0;i<STEPS.length;i++){setPhase(i+1);await sl(280+Math.random()*200);}
-    const p={scheme:mode.toUpperCase(),circuit:C.name,pi_a:["0x"+hx(64),"0x"+hx(64),"0x01"],pi_c:["0x"+hx(64),"0x"+hx(64),"0x01"],constraints:C.constraints,provingTime:(C.time+(Math.random()-.5)*.4).toFixed(2)+"s",hash:"0x"+hx(64),ts:tc()};
-    setProof(p);setProving(false);
-    setHistory(h=>[{...p,id:hx(8)},...h.slice(0,9)]);
-    notify("ZK Proof Ready",`${mode.toUpperCase()} · ${C.name} · ${p.provingTime}`,"success");
-  };
-
-  const verify=async()=>{
-    if(!proof||!onArc)return;
-    setVerifying(true);await sl(400+Math.random()*500);
-    setVerified(Math.random()>.04);setVerifying(false);
-  };
-
-  return (
-    <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="🔐" title="ZK PROOF CONSOLE" sub="Groth16 & PLONK proof generation on Arc Testnet"/>
-      <NotOnArcWarning/>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:9, marginBottom:12 }}>
-        <div>
-          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>PROVING SCHEME</div>
-          <div style={{ display:"flex", gap:5, marginBottom:10 }}>
-            {["groth16","plonk"].map(m=><button key={m} onClick={()=>{setMode(m);setProof(null);setVerified(null);}} style={{ flex:1, padding:"7px 0", background:mode===m?"rgba(0,255,176,.1)":"rgba(0,0,0,.35)", border:`1px solid ${mode===m?"rgba(0,255,176,.4)":"rgba(0,255,176,.1)"}`, borderRadius:3, color:mode===m?"#00FFB0":"#94a3b8", fontSize:9, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", transition:"all .2s", textTransform:"uppercase" }}>{m}</button>)}
-          </div>
-          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>CIRCUIT</div>
-          {Object.entries(CIRCS).map(([id,cc])=><button key={id} onClick={()=>{setCircuit(id);setProof(null);setVerified(null);}} style={{ padding:"8px 11px", background:circuit===id?"rgba(0,255,176,.08)":"rgba(0,0,0,.3)", border:`1px solid ${circuit===id?"rgba(0,255,176,.3)":"rgba(0,255,176,.08)"}`, borderRadius:4, cursor:"pointer", textAlign:"left", transition:"all .2s", marginBottom:5, display:"block", width:"100%" }}><div style={{ fontSize:10, color:circuit===id?"#ffffff":"#94a3b8", fontFamily:"monospace", fontWeight:700 }}>{cc.name}</div><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{cc.constraints.toLocaleString()} R1CS · ~{cc.time}s</div></button>)}
-          <div style={{ marginTop:8 }}><ArcBtn label={proving?"Proving...":"⟶ GENERATE PROOF"} onClick={run} loading={proving} disabled={proving}/></div>
-        </div>
-        <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"11px 13px" }}>
-          <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:8 }}>PROVING STATUS</div>
-          {proving?(STEPS.slice(0,phase).map((s,i)=><div key={i} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}><span style={{ fontSize:i===phase-1?10:9, color:i===phase-1?"#00FFB0":"#4a7c5f" }}>{i===phase-1?<span style={{ animation:"pulse .8s infinite" }}>›</span>:"✓"}</span><span style={{ fontSize:9, color:i===phase-1?"#ffffff":"#64748b", fontFamily:"monospace" }}>{s}</span></div>))
-            :proof?<div style={{ animation:"fi .4s ease" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10 }}><div style={{ width:7, height:7, borderRadius:"50%", background:"#00FFB0", boxShadow:"0 0 6px #00FFB0" }}/><span style={{ fontSize:11, color:"#00FFB0", fontFamily:"monospace", fontWeight:700 }}>PROOF READY ✓</span></div>
-              {[["Scheme",proof.scheme],["Circuit",proof.circuit],["Constraints",Number(proof.constraints).toLocaleString()],["Proving Time",proof.provingTime],["π_A",proof.pi_a[0].slice(0,18)+"···"],["π_C",proof.pi_c[0].slice(0,18)+"···"]].map(([k,v])=><div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}><span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{k}</span><span style={{ fontSize:8, color:"#94a3b8", fontFamily:"monospace", overflow:"hidden", textOverflow:"ellipsis", maxWidth:"58%", textAlign:"right" }}>{v}</span></div>)}
-              <div style={{ marginTop:8 }}>
-                {verified===null?<button onClick={verify} disabled={verifying} style={{ width:"100%", padding:"7px 0", background:"transparent", border:"1px solid rgba(0,255,176,.3)", borderRadius:3, color:"#00FFB0", fontSize:9, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", display:"flex", alignItems:"center", justifyContent:"center", gap:6, transition:"all .2s" }} onMouseEnter={e=>e.currentTarget.style.background="rgba(0,255,176,.08)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{verifying?<><Sp sz={9}/>Verifying on-chain...</>:"⟶ VERIFY ON TESTNET"}</button>
-                  :<div style={{ padding:"7px 0", textAlign:"center", background:`rgba(${verified?"0,255,176":"248,113,113"},.08)`, border:`1px solid rgba(${verified?"0,255,176":"248,113,113"},.3)`, borderRadius:3, fontSize:9, color:verified?"#00FFB0":"#f87171", fontFamily:"monospace" }}>{verified?"✓ VALID PROOF — VERIFIED ON ARC TESTNET":"✕ INVALID PROOF"}</div>}
-              </div>
-            </div>
-            :<div style={{ textAlign:"center", padding:"20px 0" }}><div style={{ fontSize:30, marginBottom:8, opacity:.3 }}>🔐</div><div style={{ fontSize:9, color:"#334155", fontFamily:"monospace" }}>Select circuit and generate proof</div></div>}
-        </div>
-      </div>
-      {history.length>0&&<div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:5, padding:"10px 13px" }}>
-        <div style={{ fontSize:7, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:7 }}>PROOF HISTORY</div>
-        <div style={{ maxHeight:120, overflow:"auto" }}>
-          {history.map((p,i)=><div key={i} style={{ display:"flex", alignItems:"center", gap:9, padding:"5px 0", borderBottom:"1px solid rgba(0,255,176,.04)" }}><div style={{ width:4, height:4, borderRadius:"50%", background:"#00FFB0", flexShrink:0 }}/><div style={{ flex:1 }}><div style={{ fontSize:9, color:"#ffffff", fontFamily:"monospace" }}>{p.scheme} · {p.circuit}</div><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{p.ts} · {p.provingTime}</div></div><div style={{ fontSize:8, color:"#4ade80", fontFamily:"monospace" }}>{Number(p.constraints).toLocaleString()}</div></div>)}
-        </div>
-      </div>}
-    </div>
-  );
-}
-
-function GovPanel({ account, onArc, notify }) {
-  const [voting,setVoting]=useState({}); const [delegate,setDelegate]=useState(""); const [delegating,setDelegating]=useState(false);
-  const PROPS=[
-    {id:"PIP-04",title:"Increase ShieldVault deposit limit to 500K USDC",status:"active",type:"parameter",for:6842340,against:1203110,abstain:342000,quorum:5000000,ends:"2d 14h"},
-    {id:"PIP-03",title:"Reduce Private Send fee to 0.02 USDC",status:"active",type:"fee",for:9123400,against:880200,abstain:121000,quorum:5000000,ends:"5d 02h"},
-    {id:"PIP-02",title:"Add BNB Chain bridge adapter v2",status:"passed",type:"upgrade",for:11240000,against:320000,abstain:88000,quorum:5000000,ends:"Ended"},
-    {id:"PIP-01",title:"Launch PrivARC token incentive program",status:"defeated",type:"tokenomics",for:2100000,against:8900000,abstain:440000,quorum:5000000,ends:"Ended"},
+function GovPanel() {
+  const PARAMS = [
+    { k: "Voting delay",       v: "1 block (~1s on Arc)" },
+    { k: "Voting period",      v: "50,400 blocks (~7 days)" },
+    { k: "Proposal threshold", v: "10,000 tokens" },
+    { k: "Quorum",             v: "4% of total supply (400 bps)" },
+    { k: "Timelock delay",     v: "48h minimum (MIN_DELAY)" },
+    { k: "Voting power",       v: "veARC — snapshot at block T‑1 (flash-loan resistant)" },
   ];
-  const SC={active:"#00FFB0",passed:"#4ade80",defeated:"#f87171"};
-  const TC={parameter:"#0EA5E9",fee:"#fbbf24",upgrade:"#a78bfa",tokenomics:"#f97316"};
-
-  const vote=async(id,side)=>{
-    if(!onArc){notify("Vote","Switch to Arc Testnet first","error");return;}
-    setVoting(p=>({...p,[id]:side+"_l"}));
-    // Real vote = real tx on Arc Testnet
-    try {
-      const hash = await sendTransaction(account.address, account.address, "0x0", "0xvote"+hx(8));
-      notify("Vote Cast",`Voted ${side} on ${id} — tx submitted`,"success",hash);
-      setVoting(p=>({...p,[id]:side}));
-    } catch(e) {
-      if(e.code===4001){notify("Vote","Rejected by user","error");setVoting(p=>({...p,[id]:undefined}));return;}
-      setVoting(p=>({...p,[id]:side})); // continue on simulation fallback
-      notify("Vote Cast",`Voted ${side} on ${id}`,"success","0x"+hx(64));
-    }
-  };
-
-  const Bar=({f,a,ab,q})=>{const tot=f+a+ab||1;return <div style={{ marginBottom:8 }}><div style={{ height:6, borderRadius:3, overflow:"hidden", background:"rgba(0,0,0,.5)", position:"relative", marginBottom:3 }}><div style={{ position:"absolute", left:0, top:0, height:"100%", width:`${(f/tot)*100}%`, background:"#00FFB0" }}/><div style={{ position:"absolute", left:`${(f/tot)*100}%`, top:0, height:"100%", width:`${(a/tot)*100}%`, background:"#f87171" }}/><div style={{ position:"absolute", left:`${((f+a)/tot)*100}%`, top:0, height:"100%", width:`${(ab/tot)*100}%`, background:"#475569" }}/><div style={{ position:"absolute", left:`${Math.min((q/tot)*100,99)}%`, top:-1, height:"calc(100%+2px)", width:1.5, background:"#fbbf24" }}/></div><div style={{ display:"flex", gap:8, fontSize:7, fontFamily:"monospace" }}><span style={{ color:"#00FFB0" }}>FOR {(f/1e6).toFixed(1)}M</span><span style={{ color:"#f87171" }}>AGAINST {(a/1e6).toFixed(1)}M</span><span style={{ color:"#fbbf24", marginLeft:"auto" }}>QUORUM {(q/1e6).toFixed(0)}M</span></div></div>;};
+  const CONTRACTS_LIST = [
+    { name: "Governance", address: CONTRACTS.Governance },
+    { name: "Timelock",   address: CONTRACTS.Timelock },
+    { name: "Staking (veARC source)", address: CONTRACTS.Staking },
+  ];
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="🗳" title="GOVERNANCE" sub="On-chain proposals — real votes on Arc Testnet"/>
+      <PH icon="🗳" title="GOVERNANCE" sub="Protocol parameters — Arc Testnet"/>
       <NotOnArcWarning/>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace" }}>
-        ℹ Votes are real transactions on Arc Testnet. Your wallet will prompt for signature.
+        ℹ On-chain proposal creation and voting UI is in development. Use the contract addresses below to interact directly via ARCScan in the meantime.
       </div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
-        <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.18)", borderRadius:5, padding:"12px 14px" }}><div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:5 }}>WALLET</div><div style={{ fontSize:13, color:"#00FFB0", fontFamily:"monospace", fontWeight:700 }}>{sh(account?.address)}</div><div style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>{account?.walletName} · Arc Testnet</div></div>
-        <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px 14px" }}><div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:7 }}>DELEGATE VOTES</div><OsField label="" value={delegate} onChange={e=>setDelegate(e.target.value)} placeholder="0x... or name.arc" icon="👤"/><ArcBtn label={delegating?"Delegating...":"DELEGATE"} onClick={async()=>{if(!delegate||!onArc)return;setDelegating(true);try{
-  // FIX F-09: delegate(address) = 0x5c19a95c — "0xdelegate" was invalid calldata
-  const delegateCalldata="0x5c19a95c"+encodeAddress(delegate);
-  const h=await sendTransaction(account.address,CONTRACTS.USDC,"0x0",delegateCalldata);
-  notify("Delegated",`Votes delegated to ${sh(delegate)}`,"success",h);}catch(e){if(e.code!==4001)notify("Delegate Failed",e.message||"Transaction failed","error");}setDelegating(false);}} loading={delegating} disabled={!delegate||!onArc} small/></div>
-      </div>
-      {PROPS.map(p=>(
-        <div key={p.id} style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.09)", borderRadius:5, padding:"12px 14px", marginBottom:8 }}>
-          <div style={{ display:"flex", alignItems:"flex-start", gap:8, marginBottom:7 }}>
-            <div style={{ flex:1 }}>
-              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:3 }}>
-                <span style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace", fontWeight:700 }}>{p.id}</span>
-                <span style={{ fontSize:7, background:`${SC[p.status]}18`, border:`1px solid ${SC[p.status]}40`, borderRadius:2, padding:"1px 6px", color:SC[p.status], fontFamily:"monospace" }}>{p.status}</span>
-                <span style={{ fontSize:7, background:`${TC[p.type]}18`, border:`1px solid ${TC[p.type]}40`, borderRadius:2, padding:"1px 6px", color:TC[p.type], fontFamily:"monospace" }}>{p.type}</span>
-              </div>
-              <div style={{ fontSize:11, color:"#ffffff", fontFamily:"monospace", fontWeight:700, lineHeight:1.3 }}>{p.title}</div>
-              <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:2 }}>ends {p.ends}</div>
-            </div>
+      <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px 14px", marginBottom:10 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:8 }}>PROTOCOL PARAMETERS</div>
+        {PARAMS.map(({k,v})=>(
+          <div key={k} style={{ display:"flex", justifyContent:"space-between", gap:10, marginBottom:6 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", flexShrink:0 }}>{k}</span>
+            <span style={{ fontSize:9, color:"#94a3b8", fontFamily:"monospace", textAlign:"right" }}>{v}</span>
           </div>
-          <Bar f={p.for} a={p.against} ab={p.abstain} q={p.quorum}/>
-          {p.status==="active"&&(!voting[p.id]
-            ?<div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:5 }}>{[["FOR","#00FFB0"],["AGAINST","#f87171"],["ABSTAIN","#475569"]].map(([side,c])=><button key={side} onClick={()=>vote(p.id,side.toLowerCase())} style={{ padding:"6px 0", background:"transparent", border:`1px solid ${c}40`, borderRadius:3, color:c, fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".1em", transition:"all .2s" }} onMouseEnter={e=>e.currentTarget.style.background=`${c}12`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{voting[p.id]===side.toLowerCase()+"_l"?<Sp sz={8} c={c}/>:side}</button>)}</div>
-            :<div style={{ padding:"6px 0", textAlign:"center", background:"rgba(0,255,176,.06)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, fontSize:9, color:"#00FFB0", fontFamily:"monospace" }}>✓ VOTED {voting[p.id]?.toUpperCase()}</div>
-          )}
-        </div>
-      ))}
+        ))}
+      </div>
+      <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.1)", borderRadius:5, padding:"12px 14px" }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".16em", fontFamily:"monospace", marginBottom:8 }}>DEPLOYED CONTRACTS</div>
+        {CONTRACTS_LIST.map(c=>(
+          <div key={c.name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, marginBottom:6 }}>
+            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace", flexShrink:0 }}>{c.name}</span>
+            <a href={`${ARC_TESTNET.explorer}/address/${c.address}`} target="_blank" rel="noreferrer" style={{ fontSize:9, color:"#00FFB0", fontFamily:"monospace", textDecoration:"none" }}>{sh(c.address)} ↗</a>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -3556,43 +3418,6 @@ function PortfolioPanel({ account, balance, usdcBalance, prices, shieldedBals })
   );
 }
 
-
-function AgentsPanel({ agentLogs }) {
-  const AG=[
-    {id:"SA",name:"ShieldAgent",   role:"Vault monitoring & deposits",    load:14, s:"ACTIVE",  c:"#00FFB0"},
-    {id:"SW",name:"SwapAgent",     role:"Arc StableFX routing",            load:8,  s:"ACTIVE",  c:"#4ade80"},
-    {id:"PV",name:"PrivacyAgent",  role:"Confidential state scanning",                load:31, s:"ACTIVE",  c:"#00FFB0"},
-    {id:"RK",name:"RiskAgent",     role:"Anomaly & volatility scoring",    load:5,  s:"ACTIVE",  c:"#4ade80"},
-    {id:"ZK",name:"ZKAgent",       role:"Groth16 / PLONK proof gen",       load:62, s:"ACTIVE",  c:"#fbbf24"},
-    {id:"BR",name:"BridgeAgent",   role:"CCTP v2 cross-chain relay",       load:0,  s:"STANDBY", c:"#64748b"},
-    {id:"GO",name:"GovAgent",      role:"Arc Testnet proposal monitoring", load:2,  s:"ACTIVE",  c:"#4ade80"},
-    {id:"FE",name:"FeeAgent",      role:"USDC gas oracle & fee sweep",     load:18, s:"ACTIVE",  c:"#4ade80"},
-  ];
-  return (
-    <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="🤖" title="AI AGENT CLUSTER" sub="8 autonomous agents monitoring Arc Testnet"/>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:14 }}>
-        {AG.map(a=>(
-          <div key={a.id} style={{ background:"rgba(0,0,0,.4)", border:`1px solid rgba(0,255,176,${a.s==="ACTIVE"?.12:.04})`, borderRadius:5, padding:"10px 13px" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:a.s==="ACTIVE"?6:0 }}>
-              <div><div style={{ fontSize:10, color:a.s==="ACTIVE"?"#ffffff":"#64748b", fontFamily:"monospace", fontWeight:700 }}>{a.name}</div><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:1 }}>{a.role}</div></div>
-              <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-                <div style={{ width:5, height:5, borderRadius:"50%", background:a.s==="ACTIVE"?a.c:"#334155", boxShadow:a.s==="ACTIVE"?`0 0 5px ${a.c}`:"none" }}/>
-                <span style={{ fontSize:8, color:a.s==="ACTIVE"?a.c:"#334155", fontFamily:"monospace" }}>{a.s}</span>
-              </div>
-            </div>
-            {a.s==="ACTIVE"&&<><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:3 }}>CPU: {a.load}%</div><div style={{ height:2, background:"#0a1f14", borderRadius:1 }}><div style={{ height:"100%", background:a.c, width:`${a.load}%`, boxShadow:a.load>60?`0 0 5px ${a.c}`:"none" }}/></div></>}
-          </div>
-        ))}
-      </div>
-      <div style={{ background:"rgba(0,0,0,.5)", border:"1px solid rgba(0,255,176,.08)", borderRadius:4, padding:"10px 12px", maxHeight:180, overflow:"auto" }}>
-        <div style={{ fontSize:8, color:"#4a7c5f", letterSpacing:".2em", fontFamily:"monospace", marginBottom:7 }}>LIVE LOG — ARC TESTNET</div>
-        {[...agentLogs].reverse().map((l,i)=><div key={i} style={{ fontSize:9, fontFamily:"monospace", marginBottom:3, color:l.c, lineHeight:1.4, animation:i===0?"fi .3s ease":"none" }}><span style={{ color:"#1e3a2a", marginRight:8 }}>[{l.t}]</span>{l.m}</div>)}
-      </div>
-    </div>
-  );
-}
-
 function HistoryPanel({ txHistory }) {
   const [filter,setFilter]=useState("all");
   const all = txHistory.length ? txHistory : [];
@@ -3601,7 +3426,7 @@ function HistoryPanel({ txHistory }) {
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="📋" title="TRANSACTION HISTORY" sub="Real on-chain transactions on Arc Testnet"/>
       <div style={{ display:"flex", gap:5, marginBottom:12, flexWrap:"wrap" }}>
-        {["all","shield","swap","send","withdraw","bridge","stake","vote"].map(f=>(
+        {["all","shield","swap","send","withdraw","bridge","stake"].map(f=>(
           <button key={f} onClick={()=>setFilter(f)} style={{ padding:"4px 9px", background:filter===f?"rgba(0,255,176,.12)":"rgba(0,0,0,.35)", border:`1px solid ${filter===f?"rgba(0,255,176,.35)":"rgba(0,255,176,.08)"}`, borderRadius:3, color:filter===f?"#00FFB0":"#64748b", fontSize:8, cursor:"pointer", fontFamily:"monospace", letterSpacing:".08em", textTransform:"uppercase", transition:"all .2s" }}>{f}</button>
         ))}
       </div>

@@ -120,12 +120,12 @@ export function Landing({ navigate }) {
   }, []);
 
   const TERMINAL_LINES = [
-    "ShieldAgent :: Vault pool depth 4.23M USDC  ✓",
-    "ZKAgent :: Groth16 proof generated — 1.82s  ✓",
-    "PrivacyAgent :: Stealth scan — 0 notes leaked  ✓",
-    "RiskAgent :: Volatility index LOW (0.02)  ✓",
-    "FeeAgent :: USDC oracle $1.0001 — nominal  ✓",
-    "BridgeAgent :: CCTP v2 relay — idle  ✓",
+    "ShieldVault :: deployed @ 0xDC92...e8D02  ✓",
+    "MerkleTreeManager :: depth 20 — Poseidon2  ✓",
+    "NullifierRegistry :: append-only, anti double-spend  ✓",
+    "EmergencyController :: circuit breaker ARMED  ✓",
+    "CCTP v2 Bridge :: 6 chains supported  ✓",
+    "Timelock :: 48h minimum delay on upgrades  ✓",
   ];
 
   const NAV_LINKS = ["Features", "Architecture", "How It Works", "Roadmap"];
@@ -208,8 +208,8 @@ export function Landing({ navigate }) {
         {/* Headline */}
         <h1 style={{ fontSize: "clamp(38px,7vw,96px)", fontWeight: 900, fontFamily: "'Syne', sans-serif", lineHeight: 1.0, marginBottom: 10, animation: "fadeUp .7s .1s ease both" }}>
           <GlitchText text="privARC" style={{ color: "#00FFB0", display: "block" }} />
-          <span style={{ color: "#ffffff", display: "block", fontWeight: 700 }}>Autonomous</span>
-          <span style={{ color: "#ffffff", display: "block", fontWeight: 700 }}>Crypto OS</span>
+          <span style={{ color: "#ffffff", display: "block", fontWeight: 700 }}>Confidential</span>
+          <span style={{ color: "#ffffff", display: "block", fontWeight: 700 }}>Capital OS</span>
         </h1>
 
         {/* Subheadline */}
@@ -248,7 +248,7 @@ export function Landing({ navigate }) {
           {/* Terminal header */}
           <div style={{ background: "rgba(0,0,0,.4)", padding: "10px 16px", display: "flex", alignItems: "center", gap: 7, borderBottom: "1px solid rgba(0,255,176,.08)" }}>
             {["#EF4444","#F59E0B","#00FFB0"].map((c,i) => <div key={i} style={{ width: 10, height: 10, borderRadius: "50%", background: c, opacity: .7 }} />)}
-            <span style={{ marginLeft: 8, fontSize: 9, color: "#4a7c5f", letterSpacing: ".2em" }}>PRIVARC OS — AI AGENT CLUSTER — ARC TESTNET</span>
+            <span style={{ marginLeft: 8, fontSize: 9, color: "#4a7c5f", letterSpacing: ".2em" }}>PRIVARC OS — PROTOCOL STATUS — ARC TESTNET</span>
           </div>
           {/* Terminal body */}
           <div style={{ padding: "16px 18px", minHeight: 130 }}>
@@ -268,12 +268,12 @@ export function Landing({ navigate }) {
       <section style={{ padding: "60px 5vw", position: "relative", zIndex: 1, borderTop: "1px solid rgba(0,255,176,.06)", borderBottom: "1px solid rgba(0,255,176,.06)" }}>
         <div style={{ maxWidth: 1000, margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 20 }}>
           {[
-            { label: "Total Value Locked", value: 18.45, prefix: "$", suffix: "M", decimals: 2 },
-            { label: "ZK Proofs Generated", value: 47280, suffix: "+" },
-            { label: "AI Agents Online", value: 8, suffix: "/8" },
-            { label: "Shielded Operators", value: 2841, suffix: "+" },
-            { label: "Supported Chains", value: 6, suffix: "" },
-            { label: "Uptime", value: 99.9, suffix: "%" },
+            { label: "Chain ID", value: 5042002, suffix: "" },
+            { label: "Smart Contracts Deployed", value: 13, suffix: "" },
+            { label: "Merkle Tree Depth", value: 20, suffix: "" },
+            { label: "Bridge Chains (CCTP v2)", value: 6, suffix: "" },
+            { label: "Timelock Delay", value: 48, suffix: "h" },
+            { label: "Circuit Breaker", value: 100000, prefix: "$", suffix: "/h" },
           ].map((s, i) => (
             <Reveal key={s.label} delay={i * 80}>
               <div style={{ textAlign: "center", padding: "18px 10px" }}>
@@ -315,7 +315,7 @@ export function Landing({ navigate }) {
               },
               {
                 icon: "↗", title: "Private Send",
-                desc: "Stealth address transfers. The sender is cryptographically hidden. Supports ARC Name Service (.arc) for human-readable addresses.",
+                desc: "Stealth address transfers. The sender is cryptographically hidden. ARC Name Service (.arc human-readable addresses) is planned for a future release.",
                 tag: "Stealth",
               },
               {
@@ -329,9 +329,9 @@ export function Landing({ navigate }) {
                 tag: "CCTP v2",
               },
               {
-                icon: "🤖", title: "8 AI Agents",
-                desc: "ShieldAgent, ZKAgent, RiskAgent, SwapAgent, PrivacyAgent, BridgeAgent, GovAgent, FeeAgent — always running, always monitoring.",
-                tag: "Autonomous",
+                icon: "🛑", title: "Emergency Controller",
+                desc: "Deployed circuit-breaker contract. Auto-pauses the vault if outflow exceeds a configurable hourly threshold, protecting depositors against drains.",
+                tag: "Safety",
               },
               {
                 icon: "🗳", title: "On-Chain Governance",
@@ -430,7 +430,7 @@ export function Landing({ navigate }) {
             { step: "01", title: "Connect your wallet", desc: "Sign in with MetaMask, Rabby, WalletConnect or 5 other providers. EIP-191 signature authentication — no email, no password. Arc Testnet auto-switch included.", icon: "🔗" },
             { step: "02", title: "Get testnet USDC", desc: "Visit faucet.circle.com, select Arc Testnet, paste your address and request 1 USDC/day. USDC is the native gas token on Arc — no ETH needed.", icon: "💧" },
             { step: "03", title: "Shield your assets", desc: "Deposit USDC into the ShieldVault. Your balance enters a confidential state with governed visibility — you control who can view your activity.", icon: "🛡" },
-            { step: "04", title: "Operate privately", desc: "Swap tokens, send to any address, bridge across 6 chains — all within a confidential environment with governed visibility. 8 AI agents protect your capital 24/7.", icon: "⚡" },
+            { step: "04", title: "Operate privately", desc: "Swap tokens, send to any address, bridge across 6 chains — all within a confidential environment with governed visibility, backed by an on-chain emergency circuit breaker.", icon: "⚡" },
           ].map((s, i) => (
             <Reveal key={s.step} delay={i * 80}>
               <div style={{ display: "flex", gap: 24, marginBottom: 36, alignItems: "flex-start" }}>
@@ -464,7 +464,7 @@ export function Landing({ navigate }) {
           </Reveal>
 
           {[
-            { q: "Q3 2026", label: "CURRENT", color: "#00FFB0", items: ["Arc Testnet deployment", "ShieldVault v2.3.0 live", "Confidential Shield / Swap / Send / Bridge", "8 AI agents operational", "Governed visibility (user-scoped notes)", "Governance + Staking live"] },
+            { q: "Q3 2026", label: "CURRENT", color: "#00FFB0", items: ["Arc Testnet deployment", "ShieldVault v2.3.1 live", "Confidential Shield / Swap / Send / Bridge", "Emergency circuit breaker armed", "Governed visibility (user-scoped notes)", "Governance + Staking live"] },
             { q: "Q4 2026", label: "NEXT",    color: "#0EA5E9", items: ["EIP-712 authorized view keys (Arc whitepaper §3)", "Independent security audit x2", "ZK circuit audit (Veridise)", "Admin multisig deployment", "Bug bounty program (Immunefi)", "Arc Mainnet soft launch"] },
             { q: "Q1 2027", label: "PLANNED", color: "#a78bfa", items: ["Arc Private EVM integration (synchronous execution)", "Governed visibility API — compliance & audit mode", "veARC governance token launch", "CCTP v2 mainnet bridge activation", "Full DEX integration (Arc StableFX)", "Mobile app (iOS + Android)"] },
             { q: "Q2 2027", label: "FUTURE",  color: "#fbbf24", items: ["Hardware enclave execution (Arc Privacy Sector)", "Institutional shield pools with audit access", "Post-quantum encryption layer", "Privacy-preserving DeFi aggregator", "SDK for third-party confidential apps", "DAO transition"] },
