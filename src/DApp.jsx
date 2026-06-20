@@ -1500,16 +1500,27 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, setPanel, pric
 /* ─── TX helper shared by all panels ─────────────────────────── */
 
 /* ═══════════════════════════════════════════════════════════════
-   PROTOCOL STATS — Live on-chain reads (ShieldVault v2.0.0)
+   PROTOCOL STATS — Live on-chain reads, polled every 10s.
+   VERSION is read on-chain (not hardcoded) so this never drifts out of sync
+   after a ShieldVault redeploy — see ShieldVault.sol VERSION constant.
 ═══════════════════════════════════════════════════════════════ */
 function useProtocolStats(onArc) {
-  const [stats, setStats] = useState({ shieldedUsdc:null, shieldedEurc:null, shieldedBtc:null, leafCount:null, pauseState:null, depositsAllowed:null, tokenSupport:{} });
+  const [stats, setStats] = useState({
+    shieldedUsdc:null, shieldedEurc:null, shieldedBtc:null, leafCount:null,
+    pauseState:null, depositsAllowed:null, tokenSupport:{},
+    version:null, totalTxCount:null,
+    volumeUsdc:null, volumeEurc:null, volumeBtc:null,
+    feesUsdc:null, feesEurc:null, feesBtc:null,
+  });
   useEffect(() => {
     if (!onArc) return;
     const fetch = async () => {
       try {
         const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
-        const [su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc] = await Promise.all([
+        const [
+          su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
+          ver, txCount, volU, volE, volB, feeU, feeE, feeB,
+        ] = await Promise.all([
           call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
           call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
           call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
@@ -1520,6 +1531,15 @@ function useProtocolStats(onArc) {
           call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
           call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
           call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
+          // Live protocol stats (item 1 + item 4) — ShieldVault v2.5+
+          call(CONTRACTS.ShieldVault, SEL.VERSION),
+          call(CONTRACTS.ShieldVault, SEL.totalTxCount),
+          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.USDC)),
+          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.EURC)),
+          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.cirBTC)),
+          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
+          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
+          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
         ]);
         setStats({
           shieldedUsdc:    decodeUint256(su),
@@ -1533,6 +1553,12 @@ function useProtocolStats(onArc) {
             [CONTRACTS.EURC]:   tEurc && tEurc !== "0x" && BigInt(tEurc) === 1n,
             [CONTRACTS.cirBTC]: tBtc  && tBtc  !== "0x" && BigInt(tBtc)  === 1n,
           },
+          // Falls back to "2.4.0" (last hardcoded version) if ShieldVault predates
+          // VERSION() — i.e. talking to an old, not-yet-redeployed contract.
+          version:      decodeStringReturn(ver) || "2.4.0",
+          totalTxCount: decodeUint256(txCount),
+          volumeUsdc: decodeUint256(volU), volumeEurc: decodeUint256(volE), volumeBtc: decodeUint256(volB),
+          feesUsdc:   decodeUint256(feeU), feesEurc:   decodeUint256(feeE), feesBtc:   decodeUint256(feeB),
         });
       } catch(e) { console.warn("stats fetch:", e); }
     };
@@ -1664,6 +1690,25 @@ async function getOrCreateViewKeyPair(address) {
   return { privateKey: pair.privateKey, publicKeyHex };
 }
 
+// ── View key backup / restore (item 2A: cross-device persistence) ─────────
+// Web Crypto's P-256 ECDH has no way to deterministically derive a keypair from
+// a seed (no exposed scalar→point multiplication), so two devices can never
+// independently re-generate the SAME keypair. The only way to use confidential
+// receiving on a second device is to literally transport the private key material
+// once. This is the same tradeoff every browser-only crypto wallet without a
+// hardware/seed-phrase root makes — export here is the seed-phrase equivalent.
+function exportViewKeyBackup(address) {
+  return localStorage.getItem(viewKeyStorageKey(address)); // raw JSON {privateKeyJwk, publicKeyHex}
+}
+
+async function importViewKeyBackup(address, blob) {
+  const parsed = JSON.parse(blob);
+  if (!parsed?.privateKeyJwk || !parsed?.publicKeyHex) throw new Error("Invalid backup format");
+  // Validate it's actually a usable P-256 ECDH key before trusting/storing it
+  await crypto.subtle.importKey("jwk", parsed.privateKeyJwk, { name:"ECDH", namedCurve:"P-256" }, true, ["deriveBits"]);
+  localStorage.setItem(viewKeyStorageKey(address), JSON.stringify(parsed));
+}
+
 // ── On-chain view key registration (connect-time, once per address) ───────
 // Generates the local keypair (free), checks ViewKeyRegistry.hasViewKey() (free,
 // eth_call), and registers on-chain only if missing. Guarded by a localStorage
@@ -1763,6 +1808,36 @@ async function eciesDecryptNoteWithViewKey(recipientAddress, encryptedNoteHex, e
 // Relayed via ViewKeyRegistry.emitNote() — NOT ShieldVault — so this works
 // against the currently-deployed ShieldVault v2.2 with no vault redeploy.
 const NOTE_EMITTED_TOPIC = "0x8aa4f1b6dca845fb984ab9e095ea9417a69f44be2922e9b5cc5e19f83e336851";
+
+// ── Item 2B: self-addressed encrypted note relay (cross-device reconstruction) ──
+// Used by every handler that creates a new spendable commitment (deposit, swap
+// output, confidential-send change, bridge leftover). Encrypts the note to the
+// CALLER'S OWN registered view key and relays it via ViewKeyRegistry.emitNote() —
+// the exact same stealth-note pipeline confidential send uses for a real recipient,
+// just addressed to yourself. Once a view key is restored on a new device (Settings
+// → backup/restore), scanStealthNotes() picks these up automatically and rebuilds
+// the note without ever touching localStorage on the new device.
+// Returns true if the on-chain backup succeeded, false otherwise (deposit/swap/
+// send/bridge itself already succeeded regardless — this only affects whether
+// THIS note is cross-device recoverable, never local availability).
+async function relaySelfNote({ account, sendRealTx, commitment, amount, token, label, description }) {
+  try {
+    const selfNoteJson = JSON.stringify({
+      commitment, amount: amount.toString(), token,
+      from: account?.address, ts: Date.now(),
+    });
+    const ecies = await eciesEncryptNoteForRecipient(account?.address, selfNoteJson);
+    if (!ecies) return false; // no view key registered yet — nothing to relay
+    const { data } = buildEmitNoteCalldata({
+      recipient: account?.address, encryptedNote: ecies.encryptedNote, ephemeralPubKey: ecies.ephemeralPubKey,
+    });
+    return await sendRealTx({
+      label: label || "Cross-Device Backup",
+      description: description || "Saving an encrypted copy of this note on-chain.",
+      buildTx: () => ({ to: CONTRACTS.ViewKeyRegistry, value: "0x0", data }),
+    });
+  } catch (e) { console.warn("[self-note relay]", e.message); return false; }
+}
 
 async function scanStealthNotes(address, recompute) {
   if (!address || !CONTRACTS.ViewKeyRegistry) return;
@@ -2051,7 +2126,7 @@ function useTxSend({ account, onArc, notify, refreshBalance }) {
   return { sendRealTx };
 }
 
-function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, protocolStats }) {
+function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, protocolStats, prices }) {
   const [amount, setAmount] = useState("");
   const [tokenIdx, setTokenIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -2171,11 +2246,19 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       const notes = getNotes(account?.address);
       notes.push(note);
       saveNotes(account?.address, notes);
+
+      // ── Item 2B: self-addressed encrypted note (cross-device reconstruction) ──
+      const backedUp = await relaySelfNote({
+        account, sendRealTx, commitment, amount: netAmount, token: token.address,
+        label: "Shield · Cross-Device Backup",
+        description: "Saving an encrypted copy of this note on-chain so it's recoverable from any device.",
+      });
+
       notify(
         "Shield ✓",
         depositFee > 0n
-          ? `${formatToken(netAmount, token.decimals)} ${token.symbol} shielded (${formatToken(depositFee, token.decimals)} protocol fee).`
-          : `${amount} ${token.symbol} shielded — note saved in browser storage.`,
+          ? `${formatToken(netAmount, token.decimals)} ${token.symbol} shielded (${formatToken(depositFee, token.decimals)} protocol fee)${backedUp ? " · backed up on-chain" : ""}.`
+          : `${amount} ${token.symbol} shielded — note saved in browser storage${backedUp ? " and backed up on-chain" : ""}.`,
         "success"
       );
     }
@@ -2189,6 +2272,23 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   const tvlBtc   = ps?.shieldedBtc   != null ? "₿"+(Number(ps.shieldedBtc)/1e8).toFixed(4)   : "—";
   const vaultOk  = ps?.pauseState === 0;
   const leafCnt  = ps?.leafCount != null ? ps.leafCount.toString() : "—";
+
+  // ── Item 4: USD-blended protocol-wide totals across ALL tokens ─────────────
+  // EURC approximated 1:1 USD (stablecoin near parity, no live EUR/USD feed wired
+  // up yet); cirBTC priced off the WBTC feed (already polled — see PRICE_FALLBACK)
+  // as the closest available BTC-USD proxy.
+  const btcUsd = prices?.WBTC || 0;
+  const blendedUsd = (usdcUnits, eurcUnits, btcUnits) => {
+    if (usdcUnits == null && eurcUnits == null && btcUnits == null) return null;
+    const u = Number(usdcUnits || 0) / 1e6;
+    const e = Number(eurcUnits || 0) / 1e6;
+    const b = Number(btcUnits  || 0) / 1e8 * btcUsd;
+    return u + e + b;
+  };
+  const volTotal  = blendedUsd(ps?.volumeUsdc, ps?.volumeEurc, ps?.volumeBtc);
+  const feesTotal = blendedUsd(ps?.feesUsdc,   ps?.feesEurc,   ps?.feesBtc);
+  const protocolVolumeUsd = volTotal  != null ? "$"+volTotal.toLocaleString(undefined,{maximumFractionDigits:2})  : "—";
+  const protocolFeesUsd   = feesTotal != null ? "$"+feesTotal.toLocaleString(undefined,{maximumFractionDigits:2}) : "—";
 
   // Token registration status — if false, deposit will revert TokenNotSupported
   const tokenSupport  = ps?.tokenSupport || {};
@@ -2206,7 +2306,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
         Aligned with <a href="https://www.arc.io/privacy-whitepaper" target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>Arc Privacy Sector whitepaper</a>.
       </div>
       <NotOnArcWarning/>
-      {/* Live stats */}
+      {/* Live stats — polled every 10s from chain, see useProtocolStats() */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5, marginBottom:10 }}>
         {[
           { l:"TVL USDC",    v:tvlUsdc,  c:"#00FFB0" },
@@ -2214,7 +2314,10 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
           { l:"TVL cirBTC",  v:tvlBtc,   c:"#F7931A" },
           { l:"COMMITMENTS", v:leafCnt,  c:"#a78bfa" },
           { l:"VAULT",       v:vaultOk?"🟢 ACTIVE":"🔴 PAUSED", c:vaultOk?"#4ade80":"#f87171" },
-          { l:"VERSION",     v:"v2.0.0", c:"#64748b" },
+          { l:"VERSION",     v:ps?.version ? "v"+ps.version : "—", c:"#64748b" },
+          { l:"PROTOCOL TXS",  v:ps?.totalTxCount != null ? ps.totalTxCount.toString() : "—", c:"#38bdf8" },
+          { l:"VOLUME (TOTAL)", v:protocolVolumeUsd, c:"#facc15" },
+          { l:"FEES COLLECTED", v:protocolFeesUsd,   c:"#fb923c" },
         ].map(s=>(
           <div key={s.l} style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.08)", borderRadius:4, padding:"7px 8px" }}>
             <div style={{ fontSize:7, color:"#64748b", letterSpacing:".12em", fontFamily:"monospace", marginBottom:2 }}>{s.l}</div>
@@ -2384,7 +2487,15 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       const outAmount = BigInt(Math.round(Number(q.out) * 1e6));
       updated.push({ commitment: commitmentOut, amount: outAmount.toString(), token: tokenOutAddr, ts: Date.now() });
       saveNotes(account?.address, updated);
-      notify("Note saved", `Swap output note (${q.out} ${to}) stored locally.`, "info");
+
+      // ── Item 2B: self-addressed encrypted note (cross-device reconstruction) ──
+      const backedUp = await relaySelfNote({
+        account, sendRealTx, commitment: commitmentOut, amount: outAmount, token: tokenOutAddr,
+        label: "Swap · Cross-Device Backup",
+        description: "Saving an encrypted copy of the swap output note on-chain.",
+      });
+
+      notify("Note saved", `Swap output note (${q.out} ${to}) stored locally${backedUp ? " and backed up on-chain" : ""}.`, "info");
     }
 
     setAmount(""); setQ(null); setLoading(false);
@@ -2541,15 +2652,27 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
-      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
-      // Keep sender's copy of output note (for tracking)
+      let changeBackedUp = false;
+      if (remaining > 0n) {
+        const changeCommitment = randomBytes32();
+        updated.push({ ...note, amount: remaining.toString(), commitment: changeCommitment });
+        // ── Item 2B: self-addressed encrypted note for the change note ──────────
+        changeBackedUp = await relaySelfNote({
+          account, sendRealTx, commitment: changeCommitment, amount: remaining, token: note.token,
+          label: "Send · Change Backup",
+          description: "Saving an encrypted copy of your change note on-chain.",
+        });
+      }
+      // Keep sender's copy of output note (local history only — not a spendable
+      // note for the sender anymore, ownership transferred to the recipient, so
+      // this is NOT self-relayed via ViewKeyRegistry).
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
       saveNotes(account?.address, updated);
 
       if (isSelfSend) {
         notify("Confidential Send ✓", `${amount} USDC sent to your own shielded balance.`, "success");
       } else if (encryptedNote) {
-        // Tx 2: relay the encrypted note via ViewKeyRegistry — non-blocking on failure,
+        // Tx: relay the encrypted note via ViewKeyRegistry — non-blocking on failure,
         // funds already moved successfully in tx 1 regardless of this outcome.
         const { data: noteData } = buildEmitNoteCalldata({ recipient: dest, encryptedNote, ephemeralPubKey });
         const relayed = await sendRealTx({
@@ -2565,7 +2688,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
           "success"
         );
       } else {
-        notify("Confidential Send ✓", `${amount} USDC sent privately.`, "success");
+        notify("Confidential Send ✓", `${amount} USDC sent privately.${changeBackedUp ? " Change note backed up on-chain." : ""}`, "success");
       }
     }
 
@@ -2689,7 +2812,16 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
-      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
+      if (remaining > 0n) {
+        const changeCommitment = randomBytes32();
+        updated.push({ ...note, amount: remaining.toString(), commitment: changeCommitment });
+        // ── Item 2B: self-addressed encrypted note for the change note ──────────
+        await relaySelfNote({
+          account, sendRealTx, commitment: changeCommitment, amount: remaining, token: note.token,
+          label: "Withdraw · Change Backup",
+          description: "Saving an encrypted copy of your change note on-chain.",
+        });
+      }
       saveNotes(account?.address, updated);
     }
 
@@ -2815,9 +2947,22 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
-      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
+      let backedUp = false;
+      if (remaining > 0n) {
+        const changeCommitment = randomBytes32();
+        updated.push({ ...note, amount: remaining.toString(), commitment: changeCommitment });
+        // ── Item 2B: self-addressed encrypted note for the change note ──────────
+        // (The bridged amount itself leaves Arc entirely — there's no new Arc-side
+        // note for it to back up. Only the leftover "change" from a partial bridge
+        // is a new spendable commitment that needs cross-device recovery.)
+        backedUp = await relaySelfNote({
+          account, sendRealTx, commitment: changeCommitment, amount: remaining, token: note.token,
+          label: "Bridge · Cross-Device Backup",
+          description: "Saving an encrypted copy of the change note on-chain.",
+        });
+      }
       saveNotes(account?.address, updated);
-      notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.`, "success");
+      notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.${remaining>0n ? (backedUp ? " Change note backed up on-chain." : "") : ""}`, "success");
     }
 
     setAmount(""); setLoading(false);
@@ -3552,11 +3697,36 @@ function HistoryPanel({ txHistory }) {
   );
 }
 
-function SettingsPanel({ account, onArc }) {
+function SettingsPanel({ account, onArc, notify }) {
   const [slip, setSlip]=useState("0.5"); const [dl, setDl]=useState("20"); const [expert, setExpert]=useState(false);
+  const [backupVisible, setBackupVisible] = useState(false);
+  const [backupBlob, setBackupBlob] = useState("");
+  const [restoreInput, setRestoreInput] = useState("");
   const Tog=({on,onClick})=><div onClick={onClick} style={{ width:32, height:17, background:on?"rgba(0,255,176,.2)":"rgba(0,0,0,.5)", border:`1px solid ${on?"rgba(0,255,176,.55)":"rgba(0,255,176,.15)"}`, borderRadius:9, cursor:"pointer", position:"relative", transition:"all .2s", flexShrink:0 }}><div style={{ position:"absolute", top:2.5, left:on?15:2.5, width:10, height:10, borderRadius:"50%", background:on?"#00FFB0":"#475569", boxShadow:on?"0 0 5px #00FFB0":"none", transition:"all .2s" }}/></div>;
   const Sec=({t,c})=><div style={{ marginBottom:12 }}><div style={{ fontSize:8, color:"#4a7c5f", letterSpacing:".18em", fontFamily:"monospace", marginBottom:6, paddingBottom:5, borderBottom:"1px solid rgba(0,255,176,.06)" }}>{t}</div>{c}</div>;
   const Row=({label,sub,c})=><div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"7px 10px", background:"rgba(0,0,0,.3)", borderRadius:3, marginBottom:4, border:"1px solid rgba(255,255,255,.04)" }}><div><div style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace" }}>{label}</div><div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginTop:1 }}>{sub}</div></div>{c}</div>;
+
+  const handleExport = () => {
+    if (!account?.address) return;
+    const blob = exportViewKeyBackup(account.address);
+    if (!blob) { notify?.("No view key yet", "Connect and send/receive once first — a view key is generated automatically.", "error"); return; }
+    setBackupBlob(blob);
+    setBackupVisible(true);
+  };
+  const handleCopy = async () => {
+    try { await navigator.clipboard.writeText(backupBlob); notify?.("Copied ✓", "Backup copied — store it somewhere safe (password manager).", "success"); }
+    catch { /* clipboard permission denied — blob is already shown for manual copy */ }
+  };
+  const handleRestore = async () => {
+    if (!account?.address || !restoreInput.trim()) return;
+    try {
+      await importViewKeyBackup(account.address, restoreInput.trim());
+      notify?.("View key restored ✓", "This device can now auto-decrypt confidential transfers sent to this wallet.", "success");
+      setRestoreInput("");
+    } catch (e) {
+      notify?.("Restore failed", "That doesn't look like a valid PrivARC view-key backup.", "error");
+    }
+  };
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
@@ -3604,6 +3774,32 @@ function SettingsPanel({ account, onArc }) {
         <Row label="Address" sub={account?.address||"—"} c={<span style={{ fontSize:8, color:"#4ade80", fontFamily:"monospace" }}>ACTIVE</span>}/>
         <Row label="Provider" sub={account?.walletName||"—"} c={<span style={{ fontSize:8, color:"#94a3b8", fontFamily:"monospace" }}>{account?.walletName||"—"}</span>}/>
         <Row label="Network" sub={onArc?"Arc Testnet (5042002)":"Wrong network"} c={<span style={{ fontSize:8, color:onArc?"#4ade80":"#f87171", fontFamily:"monospace" }}>{onArc?"CORRECT":"WRONG"}</span>}/>
+      </>}/>
+
+      <Sec t="CONFIDENTIAL RECEIVING — VIEW KEY" c={<>
+        <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", lineHeight:1.6, marginBottom:8 }}>
+          Confidential sends/deposits auto-decrypt using a view key stored only on <i>this</i> browser.
+          It does not sync across devices — back it up to use confidential receiving elsewhere,
+          the same way you'd back up a seed phrase.
+        </div>
+        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+          <button onClick={handleExport} style={{ flex:1, padding:"8px", background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:3, color:"#00FFB0", fontSize:9, fontFamily:"monospace", cursor:"pointer" }}>
+            ↓ EXPORT BACKUP
+          </button>
+        </div>
+        {backupVisible && (
+          <div style={{ background:"rgba(0,0,0,.5)", border:"1px solid rgba(0,255,176,.2)", borderRadius:3, padding:8, marginBottom:8 }}>
+            <textarea readOnly value={backupBlob} onClick={(e)=>e.target.select()}
+              style={{ width:"100%", height:60, background:"transparent", border:"none", color:"#94a3b8", fontSize:7, fontFamily:"monospace", resize:"none", outline:"none" }}/>
+            <button onClick={handleCopy} style={{ width:"100%", marginTop:4, padding:"5px", background:"rgba(0,255,176,.06)", border:"1px solid rgba(0,255,176,.2)", borderRadius:2, color:"#00FFB0", fontSize:8, fontFamily:"monospace", cursor:"pointer" }}>COPY TO CLIPBOARD</button>
+            <div style={{ fontSize:7, color:"#fb923c", fontFamily:"monospace", marginTop:4 }}>⚠ Anyone with this blob can read your confidential transfers. Store it like a private key.</div>
+          </div>
+        )}
+        <textarea value={restoreInput} onChange={(e)=>setRestoreInput(e.target.value)} placeholder="Paste backup from another device to restore here…"
+          style={{ width:"100%", height:50, background:"rgba(0,0,0,.4)", border:"1px solid rgba(0,255,176,.12)", borderRadius:3, padding:6, color:"#ffffff", fontSize:8, fontFamily:"monospace", resize:"none", marginBottom:6 }}/>
+        <button onClick={handleRestore} disabled={!restoreInput.trim()} style={{ width:"100%", padding:"8px", background:restoreInput.trim()?"rgba(0,255,176,.08)":"rgba(0,0,0,.3)", border:`1px solid ${restoreInput.trim()?"rgba(0,255,176,.3)":"rgba(255,255,255,.06)"}`, borderRadius:3, color:restoreInput.trim()?"#00FFB0":"#475569", fontSize:9, fontFamily:"monospace", cursor:restoreInput.trim()?"pointer":"default" }}>
+          ↑ RESTORE ON THIS DEVICE
+        </button>
       </>}/>
     </div>
   );

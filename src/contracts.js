@@ -11,7 +11,7 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x35Fd13D2f6344D7C2069afDbf8FfD59CC3b181A4",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xE3131D3d3AcBb9d28867600b4D42Ac60eB357638",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
   Staking:             import.meta.env.VITE_STAKING               ?? "0x0505Eba4fcEc8f08fad8C088086000A0E718b0D6",
@@ -187,6 +187,11 @@ export const SEL = {
 
   // Protocol fees (Staking v1.1.0)
   performanceFeeBps:    "0xb9d4e879",  // performanceFeeBps() — Staking contract
+
+  // Live protocol stats (ShieldVault v2.5.0) — item 4: real-time dashboard
+  VERSION:              "0xffa1ad74",  // VERSION() returns (string)
+  totalTxCount:         "0x9b4f50e7",  // totalTxCount() returns (uint256)
+  totalVolumeByToken:   "0x38caed9f",  // totalVolumeByToken(address) returns (uint256)
 
   // ViewKeyRegistry v1.0.0 — real ECDH P-256 view keys for confidential-send auto-discovery
   registerViewKey:    "0x4f9d2844",  // registerViewKey(bytes)
@@ -704,6 +709,25 @@ export function previewBridgeFee(amountUnits, bridgeFeeBps) {
 export function sendFeeValueHex(sendFlatFeeUnits) {
   const wei = BigInt(sendFlatFeeUnits || 0) * 1_000_000_000_000n; // 6-dec → 18-dec wei
   return "0x" + wei.toString(16);
+}
+
+// Decode a `string` eth_call return value (offset + length + UTF-8 data).
+// Returns "" for an empty/unreadable result.
+export function decodeStringReturn(hex) {
+  const bytesHex = decodeBytesReturn(hex);
+  if (!bytesHex) return "";
+  const clean = bytesHex.replace("0x", "");
+  let str = "";
+  for (let i = 0; i < clean.length; i += 2) {
+    const code = parseInt(clean.slice(i, i+2), 16);
+    if (code > 0) str += String.fromCharCode(code);
+  }
+  return str;
+}
+
+// totalVolumeByToken(address) — for eth_call
+export function buildTotalVolumeByTokenCall(token) {
+  return SEL.totalVolumeByToken + encodeAddress(token);
 }
 
 // ─── VIEW KEY REGISTRY ────────────────────────────────────────────────────────
