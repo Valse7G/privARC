@@ -8,6 +8,9 @@ import {
   buildShieldedSendCalldata, buildPrivateSwapCalldata, buildPrivateBridgeCalldata,
   buildApproveCalldata, buildStakeCalldata, needsApproveBeforeDeposit,
   randomBytes32, buildGetLastRootCall,
+  buildRegisterViewKeyCalldata, buildHasViewKeyCall, buildGetViewKeyCall,
+  buildEmitNoteCalldata, decodeBytesReturn,
+  previewDepositFee, previewWithdrawFee, previewSwapFee, previewBridgeFee, sendFeeValueHex,
 } from "./contracts.js";
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1256,17 +1259,21 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   }, [account?.address]);
 
   const { bals: shieldedBals, recompute: recomputeShielded } = useShieldedBalances(prices, account?.address);
+  const { sendRealTx: sendViewKeyTx } = useTxSend({ account, onArc, notify, refreshBalance });
 
-  // Scan chain for ECIES stealth notes addressed to this wallet on every connect
+  // Scan chain for ECDH stealth notes addressed to this wallet on every connect,
+  // and opportunistically register a view key (real ECDH P-256) if missing —
+  // see ensureViewKeyRegistered() for the once-per-address retry guard.
   useEffect(() => {
     if (!account?.address || !onArc) return;
     scanStealthNotes(account.address, recomputeShielded).catch(() => {});
+    ensureViewKeyRegistered(account.address, sendViewKeyTx, notify).catch(() => {});
     // Rescan every 2 minutes in case new stealth notes arrive
     const id = setInterval(() => {
       scanStealthNotes(account.address, recomputeShielded).catch(() => {});
     }, 120_000);
     return () => clearInterval(id);
-  }, [account?.address, onArc, recomputeShielded]);
+  }, [account?.address, onArc, recomputeShielded, sendViewKeyTx, notify]);
 
   const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, setPanel, protocolStats, shieldedBals, recomputeShielded };
 
@@ -1540,40 +1547,40 @@ function useProtocolStats(onArc) {
 // Aggregates localStorage notes per token, returns per-token balances + USD total.
 // Updates whenever notes change (storage event) or component re-renders.
 // ═══════════════════════════════════════════════════════════════
-//  ECIES STEALTH NOTES — secp256k1 + AES-256-GCM
-//  Encrypt note for recipient → emit on-chain → recipient decrypts on connect
-//  No external lib needed: SubtleCrypto (Web Crypto API) + wallet signing
 // ═══════════════════════════════════════════════════════════════
-
-// Recover uncompressed public key from an Ethereum personal_sign signature
-// personal_sign(msg) → sig → ecrecover → pubkey (65 bytes uncompressed)
-async function recoverPublicKeyFromSignature(address, message) {
-  // Ask wallet to sign a deterministic message — we use the signature bytes
-  // to reconstruct the full 65-byte uncompressed public key
-  const msgHex = "0x" + Array.from(new TextEncoder().encode(message)).map(b=>b.toString(16).padStart(2,'0')).join('');
-  const sig = await rpcCall("personal_sign", [msgHex, address]);
-  if (!sig || sig === "0x") throw new Error("Wallet rejected signature");
-
-  // Parse r, s, v from signature (65 bytes)
-  const sigBytes = hexToBytes(sig.slice(2));
-  const r = sigBytes.slice(0, 32);
-  const s = sigBytes.slice(32, 64);
-  const v = sigBytes[64];
-  const recoveryId = v >= 27 ? v - 27 : v;
-
-  // Use SubtleCrypto + secp256k1 to recover public key
-  // We derive the public key by: pubkey = G * privkey
-  // From ECDSA: r, s, recoveryId → pubkey
-  // We use a simplified approach via SubtleCrypto's ECDH import
-  // This gives us the x-coordinate; we compute y from the curve equation
-
-  // Actually: use the signature to derive via the secp256k1 recovery algorithm
-  // Simplified: import as ECDSA raw key using the signed hash
-  const msgPrefix = `\x19Ethereum Signed Message:\n${message.length}`;
-  const msgHash = await subtleKeccak(msgPrefix + message);
-
-  return await recoverPubKeySecp256k1(msgHash, r, s, recoveryId);
-}
+//  CONFIDENTIAL SEND — STEALTH NOTES via real ECDH (P-256) + ViewKeyRegistry
+//
+//  Fixes a critical bug in the original implementation: sender and recipient
+//  derived their "shared secret" from two DIFFERENT inputs
+//  (SHA256(addr || ephemeralPRIVATEscalar) vs SHA256(addr || ephemeralPUBLICkey)),
+//  so decryption could never succeed — it was not ECDH at all.
+//
+//  This version performs REAL ECDH using the Web Crypto API (no external libs,
+//  consistent with this project's zero-dependency frontend):
+//
+//   1. Every wallet gets its own P-256 "view keypair" — separate from the EVM
+//      spending key — generated client-side via crypto.subtle.generateKey().
+//      The private half never leaves localStorage; the public half (65-byte
+//      raw uncompressed point) is registered on-chain in ViewKeyRegistry.sol.
+//
+//   2. Sender looks up the recipient's view public key on-chain, generates a
+//      fresh ephemeral P-256 keypair (new key per send → forward secrecy, no
+//      way to link multiple sends to the same recipient on-chain), and runs
+//      crypto.subtle.deriveBits({name:"ECDH", public: recipientPubKey}, ephemeralPrivateKey)
+//      — a genuine elliptic-curve Diffie-Hellman shared secret.
+//
+//   3. Recipient runs the mirror operation:
+//      crypto.subtle.deriveBits({name:"ECDH", public: ephemeralPubKey}, myViewPrivateKey)
+//      By the ECDH commutativity property this is GUARANTEED to equal the
+//      sender's shared secret — no hash-mismatch bug possible.
+//
+//   4. Both sides run the same shared secret through HKDF-SHA256 to derive an
+//      AES-256-GCM key, encrypt/decrypt the note JSON.
+//
+//  Notes are relayed via ViewKeyRegistry.emitNote() (NOT ShieldVault) so this
+//  works against the currently-deployed ShieldVault v2.2 without requiring a
+//  vault redeploy. See contracts/ViewKeyRegistry.sol for full rationale.
+// ═══════════════════════════════════════════════════════════════
 
 // Keccak256 via SubtleCrypto (SHA-256 fallback for key derivation)
 async function subtleSHA256(data) {
@@ -1597,7 +1604,6 @@ async function aesEncrypt(keyBytes, plaintext) {
   const key = await crypto.subtle.importKey("raw", keyBytes, { name:"AES-GCM" }, false, ["encrypt"]);
   const iv  = crypto.getRandomValues(new Uint8Array(12));
   const ct  = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
-  // Prepend IV to ciphertext
   const result = new Uint8Array(iv.byteLength + ct.byteLength);
   result.set(iv, 0);
   result.set(new Uint8Array(ct), iv.byteLength);
@@ -1622,91 +1628,153 @@ function hexToBytes(hex) {
 }
 function bytesToHex(bytes) { return "0x" + Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 
-// ── ECIES Encrypt (sender side) ────────────────────────────────────────────
-// Derive recipient's public key via a signed message, then ECDH + AES-GCM encrypt
-async function eciesEncryptNote(recipientAddress, noteJson) {
-  // Step 1: get recipient pubkey via signed message
-  // We ask the RECIPIENT's wallet... but sender is encrypting FOR recipient
-  // Solution: use eth_getCode + a public key registry
-  // PRACTICAL APPROACH for testnet: derive shared secret from:
-  //   sharedSecret = SHA256(recipientAddress + ephemeralPrivKey)
-  // This is not full ECIES but works without pubkey recovery
-  // Full ECIES requires recipient to have signed something on-chain previously
+// ── View keypair storage (per-wallet, localStorage-scoped) ────────────────
+const viewKeyStorageKey = (addr) => `privarc_viewkeypair_${addr.toLowerCase()}`;
 
-  // Generate ephemeral key pair using SubtleCrypto ECDH
-  const ephemeral = await crypto.subtle.generateKey(
-    { name:"ECDH", namedCurve:"P-256" }, // P-256 ≈ secp256r1 (use as proxy for testnet)
-    true, ["deriveKey","deriveBits"]
+// Load an EXISTING local view keypair, or null if none was ever generated on
+// this device. Deliberately does NOT auto-generate — used by the decrypt path,
+// where silently generating a fresh (non-matching) key would mask real failures.
+async function loadViewKeyPair(address) {
+  try {
+    const raw = localStorage.getItem(viewKeyStorageKey(address));
+    if (!raw) return null;
+    const { privateKeyJwk, publicKeyHex } = JSON.parse(raw);
+    const privateKey = await crypto.subtle.importKey(
+      "jwk", privateKeyJwk, { name:"ECDH", namedCurve:"P-256" }, true, ["deriveBits"]
+    );
+    return { privateKey, publicKeyHex };
+  } catch { return null; }
+}
+
+// Load the local view keypair, generating + persisting a new one if absent.
+// Used by the connect-time registration flow (sender side doesn't need this —
+// it only ever reads OTHER people's public keys from chain).
+async function getOrCreateViewKeyPair(address) {
+  const existing = await loadViewKeyPair(address);
+  if (existing) return existing;
+
+  const pair = await crypto.subtle.generateKey(
+    { name:"ECDH", namedCurve:"P-256" }, true, ["deriveBits"]
+  );
+  const privateKeyJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  const publicKeyRaw  = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)); // 65 bytes, 0x04 prefix
+  const publicKeyHex  = bytesToHex(publicKeyRaw);
+
+  localStorage.setItem(viewKeyStorageKey(address), JSON.stringify({ privateKeyJwk, publicKeyHex }));
+  return { privateKey: pair.privateKey, publicKeyHex };
+}
+
+// ── On-chain view key registration (connect-time, once per address) ───────
+// Generates the local keypair (free), checks ViewKeyRegistry.hasViewKey() (free,
+// eth_call), and registers on-chain only if missing. Guarded by a localStorage
+// flag so a rejected signature doesn't re-prompt on every connect.
+const viewKeyAttemptedFlag = (addr) => `privarc_viewkey_attempted_${addr.toLowerCase()}`;
+
+async function ensureViewKeyRegistered(address, sendRealTx, notify) {
+  if (!CONTRACTS.ViewKeyRegistry) return; // feature not deployed yet — no-op
+  if (!address) return;
+
+  const { publicKeyHex } = await getOrCreateViewKeyPair(address);
+
+  let alreadyRegistered = false;
+  try {
+    const res = await rpcCall("eth_call", [{ to: CONTRACTS.ViewKeyRegistry, data: buildHasViewKeyCall(address) }, "latest"]);
+    alreadyRegistered = decodeUint8(res) === 1 || /0{63}1$/.test((res||"").replace("0x",""));
+  } catch { /* assume not registered, will retry next connect */ return; }
+
+  if (alreadyRegistered) return;
+  if (localStorage.getItem(viewKeyAttemptedFlag(address))) return; // already asked once, don't nag
+
+  localStorage.setItem(viewKeyAttemptedFlag(address), "1");
+  const { data } = buildRegisterViewKeyCalldata(publicKeyHex);
+  await sendRealTx({
+    label: "Enable Confidential Receiving",
+    description: "Registering your view key — lets senders auto-deliver encrypted notes to you.",
+    buildTx: () => ({ to: CONTRACTS.ViewKeyRegistry, value: "0x0", data }),
+  });
+}
+
+// ── ECIES Encrypt (sender side) — real ECDH against recipient's registered key ──
+// Returns null if ViewKeyRegistry isn't deployed or recipient hasn't registered
+// a view key — caller should fall back to a non-stealth confidential send.
+async function eciesEncryptNoteForRecipient(recipientAddress, noteJson) {
+  if (!CONTRACTS.ViewKeyRegistry) return null;
+
+  let recipientPubKeyHex;
+  try {
+    const res = await rpcCall("eth_call", [{ to: CONTRACTS.ViewKeyRegistry, data: buildGetViewKeyCall(recipientAddress) }, "latest"]);
+    recipientPubKeyHex = decodeBytesReturn(res);
+  } catch { return null; }
+
+  if (!recipientPubKeyHex || hexToBytes(recipientPubKeyHex).length !== 65) return null; // recipient has no view key
+
+  const recipientPubKey = await crypto.subtle.importKey(
+    "raw", hexToBytes(recipientPubKeyHex), { name:"ECDH", namedCurve:"P-256" }, false, []
   );
 
-  // Export ephemeral public key (65 bytes uncompressed → convert to hex)
-  const ephPubRaw = await crypto.subtle.exportKey("raw", ephemeral.publicKey);
-  const ephPubBytes = new Uint8Array(ephPubRaw); // 65 bytes for P-256
+  // Fresh ephemeral keypair — never reused, gives forward secrecy + unlinkability
+  const ephemeral = await crypto.subtle.generateKey(
+    { name:"ECDH", namedCurve:"P-256" }, true, ["deriveBits"]
+  );
+  const ephPubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", ephemeral.publicKey)); // 65 bytes
 
-  // For the recipient's public key: use their address as a seed (testnet simplification)
-  // In production: recipient signs once → we recover their secp256k1 pubkey from sig
-  // TESTNET: use SHA256(address) as a deterministic "public key" seed for AES key
-  const addrBytes  = hexToBytes(recipientAddress);
-  const ephPrivRaw = await crypto.subtle.exportKey("pkcs8", ephemeral.privateKey);
-  const ephPrivBytes = new Uint8Array(ephPrivRaw).slice(-32); // last 32 bytes = scalar
+  // Real ECDH shared secret (32 bytes — P-256 field size)
+  const sharedBits = await crypto.subtle.deriveBits(
+    { name:"ECDH", public: recipientPubKey }, ephemeral.privateKey, 256
+  );
+  const sharedSecret = new Uint8Array(sharedBits);
 
-  // Derive shared secret: SHA256(address || ephemeralPrivScalar)
-  // Recipient side: SHA256(address || ephemeralPubKey[1:33]) — computable from on-chain data + private key knowledge
-  const sharedInput = new Uint8Array(addrBytes.length + ephPrivBytes.length);
-  sharedInput.set(addrBytes, 0);
-  sharedInput.set(ephPrivBytes, addrBytes.length);
-  const sharedSecret = await subtleSHA256(sharedInput);
-
-  // Derive AES key from shared secret
-  const aesKey = await hkdf(sharedSecret, addrBytes, "privarc-stealth-note-v1");
-
-  // Encrypt the note JSON
+  const addrBytes = hexToBytes(recipientAddress);
+  const aesKey = await hkdf(sharedSecret, addrBytes, "privarc-stealth-note-v2");
   const ciphertext = await aesEncrypt(aesKey, noteJson);
 
   return {
-    encryptedNote:  bytesToHex(ciphertext),        // bytes on-chain
-    ephemeralPubKey: bytesToHex(ephPubBytes.slice(1, 34)), // 33 bytes compressed-ish
+    encryptedNote:   bytesToHex(ciphertext),
+    ephemeralPubKey: bytesToHex(ephPubRaw), // full 65-byte raw point
   };
 }
 
-// ── ECIES Decrypt (recipient side on wallet connect) ───────────────────────
-async function eciesDecryptNote(recipientAddress, encryptedNoteHex, ephemeralPubKeyHex) {
+// ── ECIES Decrypt (recipient side, on wallet connect) — mirrors the sender's ECDH ──
+async function eciesDecryptNoteWithViewKey(recipientAddress, encryptedNoteHex, ephemeralPubKeyHex) {
   try {
-    const addrBytes   = hexToBytes(recipientAddress);
-    const ephPubBytes = hexToBytes(ephemeralPubKeyHex);
+    const local = await loadViewKeyPair(recipientAddress);
+    if (!local) return null; // no local view key on this device — cannot decrypt
 
-    // Recipient decryption:
-    // sharedSecret = SHA256(address || ephPubBytes) — mirrors encryption
-    // The recipient KNOWS their address, and ephPubKey is on-chain
-    // Security: only someone who knows the exact ephemeral private key can forge this
-    // In production: use full ECDH with wallet's secp256k1 private key
-    const sharedInput = new Uint8Array(addrBytes.length + ephPubBytes.length);
-    sharedInput.set(addrBytes, 0);
-    sharedInput.set(ephPubBytes, addrBytes.length);
-    const sharedSecret = await subtleSHA256(sharedInput);
+    const ephPubKey = await crypto.subtle.importKey(
+      "raw", hexToBytes(ephemeralPubKeyHex), { name:"ECDH", namedCurve:"P-256" }, false, []
+    );
 
-    const aesKey    = await hkdf(sharedSecret, addrBytes, "privarc-stealth-note-v1");
+    // Same shared secret as the sender computed, by ECDH commutativity:
+    // ECDH(ephemeralPriv, recipientPub) === ECDH(recipientPriv, ephemeralPub)
+    const sharedBits = await crypto.subtle.deriveBits(
+      { name:"ECDH", public: ephPubKey }, local.privateKey, 256
+    );
+    const sharedSecret = new Uint8Array(sharedBits);
+
+    const addrBytes = hexToBytes(recipientAddress);
+    const aesKey = await hkdf(sharedSecret, addrBytes, "privarc-stealth-note-v2");
     const ciphertext = hexToBytes(encryptedNoteHex);
-    const plaintext  = await aesDecrypt(aesKey, ciphertext);
+    const plaintext = await aesDecrypt(aesKey, ciphertext);
     return JSON.parse(plaintext);
   } catch { return null; }
 }
 
 // ── Scan chain for stealth notes addressed to this wallet ─────────────────
-const STEALTH_NOTE_TOPIC = "0x84c7fa3bffb70ac4fd140fbbcc40e216c235b40573c28e73625aa1991452c190";
+// Relayed via ViewKeyRegistry.emitNote() — NOT ShieldVault — so this works
+// against the currently-deployed ShieldVault v2.2 with no vault redeploy.
+const NOTE_EMITTED_TOPIC = "0x8aa4f1b6dca845fb984ab9e095ea9417a69f44be2922e9b5cc5e19f83e336851";
 
 async function scanStealthNotes(address, recompute) {
-  if (!address) return;
+  if (!address || !CONTRACTS.ViewKeyRegistry) return;
   try {
     const blockHex = await rpcCall("eth_blockNumber", []);
     const cur = parseInt(blockHex, 16);
-    // Filter StealthNoteEmitted by recipient (indexed topic[1])
     const recipientTopic = "0x" + "0".repeat(24) + address.toLowerCase().slice(2);
     const logs = await rpcCall("eth_getLogs", [{
       fromBlock: "0x" + Math.max(0, cur - 5_000_000).toString(16),
       toBlock:   "latest",
-      address:   CONTRACTS.ShieldVault,
-      topics:    [STEALTH_NOTE_TOPIC, recipientTopic],
+      address:   CONTRACTS.ViewKeyRegistry,
+      topics:    [NOTE_EMITTED_TOPIC, recipientTopic],
     }]);
     if (!Array.isArray(logs) || logs.length === 0) return;
 
@@ -1717,24 +1785,22 @@ async function scanStealthNotes(address, recompute) {
     for (const log of logs) {
       try {
         // data = abi.encode(bytes encryptedNote, bytes ephemeralPubKey, uint256 timestamp)
-        // Simplified parsing: extract the two bytes fields from log.data
         const data = (log.data || "").replace("0x","");
         if (data.length < 192) continue;
 
-        // ABI decode: offset1(32) offset2(32) timestamp(32) len1(32) data1 len2(32) data2
-        const offset1   = parseInt(data.slice(0, 64), 16);     // byte offset to encryptedNote
-        const offset2   = parseInt(data.slice(64, 128), 16);   // byte offset to ephemeralPubKey
-        const ts        = parseInt(data.slice(128, 192), 16);  // timestamp
+        const offset1 = parseInt(data.slice(0, 64), 16);     // byte offset to encryptedNote
+        const offset2 = parseInt(data.slice(64, 128), 16);   // byte offset to ephemeralPubKey
+        const ts      = parseInt(data.slice(128, 192), 16);  // timestamp
 
-        const len1      = parseInt(data.slice(offset1*2, offset1*2+64), 16);
-        const encHex    = "0x" + data.slice(offset1*2+64, offset1*2+64+len1*2);
+        const len1   = parseInt(data.slice(offset1*2, offset1*2+64), 16);
+        const encHex = "0x" + data.slice(offset1*2+64, offset1*2+64+len1*2);
 
-        const len2      = parseInt(data.slice(offset2*2, offset2*2+64), 16);
-        const ephHex    = "0x" + data.slice(offset2*2+64, offset2*2+64+len2*2);
+        const len2   = parseInt(data.slice(offset2*2, offset2*2+64), 16);
+        const ephHex = "0x" + data.slice(offset2*2+64, offset2*2+64+len2*2);
 
         if (!encHex || !ephHex) continue;
 
-        const note = await eciesDecryptNote(address, encHex, ephHex);
+        const note = await eciesDecryptNoteWithViewKey(address, encHex, ephHex);
         if (!note || !note.commitment) continue;
         if (existingSet.has(note.commitment)) continue;
 
@@ -2066,14 +2132,28 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     // For EURC/cirBTC: value = 0x0, standard ERC-20 transferFrom
     const { data: depositData, value: depositValue } = buildDepositCalldata(commitment, token.address, amountBig);
 
+    // ── Protocol fee preview (ShieldVault v2.4 — protocolFeeBps, floored at MIN_DEPOSIT_FEE) ──
+    // IMPORTANT: the contract credits totalShieldedByToken with NET-of-fee, so the locally
+    // saved note must record the SAME net amount — otherwise a later withdraw/send/swap
+    // would request more than the pool actually backs for this note. See ShieldVault.sol
+    // v2.4 changelog ("Update accounting — net of fee") for the full rationale.
+    let depositFee = 0n, netAmount = amountBig;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
+      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      const preview = previewDepositFee(amountBig, bps);
+      depositFee = preview.fee; netAmount = preview.net;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
     // Show confirmation modal before hitting wallet — shows real amount (wallet shows value=0 for ERC-20)
     const confirmed = await askConfirm({
       label:  `Shield ${token.symbol}`,
       amount,
       token:  token.symbol,
-      note:   token.isNative
+      note:   (token.isNative
         ? "Native USDC — wallet will show the USDC value correctly. 1 transaction."
-        : `Token deposit — your wallet shows value: 0 for token transactions. 2 steps: approve then deposit.`,
+        : `Token deposit — your wallet shows value: 0 for token transactions. 2 steps: approve then deposit.`)
+        + (depositFee > 0n ? ` Protocol fee: ${formatToken(depositFee, token.decimals)} ${token.symbol} — you'll receive ${formatToken(netAmount, token.decimals)} ${token.symbol} shielded.` : ""),
     });
     if (!confirmed) { setLoading(false); return; }
 
@@ -2084,12 +2164,20 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     });
 
     if (ok) {
-      // Store note locally (in production: persist to encrypted local storage)
-      const note = { commitment, amount: amountBig.toString(), token: token.address, ts: Date.now() };
+      // Store note locally with the NET (post-fee) amount — matches what ShieldVault
+      // actually credited to totalShieldedByToken, so future withdraw/send/swap on this
+      // note request an amount the pool can actually back.
+      const note = { commitment, amount: netAmount.toString(), token: token.address, ts: Date.now() };
       const notes = getNotes(account?.address);
       notes.push(note);
       saveNotes(account?.address, notes);
-      notify("Shield ✓", `${amount} ${token.symbol} shielded — note saved in browser storage.`, "success");
+      notify(
+        "Shield ✓",
+        depositFee > 0n
+          ? `${formatToken(netAmount, token.decimals)} ${token.symbol} shielded (${formatToken(depositFee, token.decimals)} protocol fee).`
+          : `${amount} ${token.symbol} shielded — note saved in browser storage.`,
+        "success"
+      );
     }
 
     setAmount(""); setLoading(false);
@@ -2269,9 +2357,22 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       routeData:    "0x",
     });
 
+    // ── Protocol fee preview (ShieldVault v2.4 — swapFeeBps, skimmed from DEX output) ──
+    // Estimate only: actual fee is computed on-chain from the real DEX output, which can
+    // differ slightly from this quote-based estimate.
+    let swapFeeEst = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps }, "latest"]);
+      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      const outBig = BigInt(Math.round(parseFloat(q.out) * 1e6));
+      swapFeeEst = previewSwapFee(outBig, bps).fee;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
     const ok = await sendRealTx({
       label: `Swap ${fr}→${to}`,
-      description: `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`,
+      description: swapFeeEst > 0n
+        ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (est. protocol fee: ~${formatToken(swapFeeEst, 6)} ${to})`
+        : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
     });
 
@@ -2379,9 +2480,10 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     const nullifierIn   = randomBytes32();
     const commitmentOut = randomBytes32();
 
-    // ── ECIES: encrypt the note for the recipient ───────────────────────────
-    // The encrypted note is emitted on-chain via StealthNoteEmitted event.
-    // Only the recipient's wallet can decrypt it on connect.
+    // ── ECDH: encrypt the note for the recipient (real P-256 ECDH, see eciesEncryptNoteForRecipient) ──
+    // Looks up the recipient's registered view public key on ViewKeyRegistry. Returns null
+    // (graceful fallback) if ViewKeyRegistry isn't deployed yet or the recipient hasn't
+    // registered a view key — the confidential send itself still proceeds either way.
     let encryptedNote   = null;
     let ephemeralPubKey = null;
     const isSelfSend = dest.toLowerCase() === account?.address?.toLowerCase?.();
@@ -2395,78 +2497,46 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
           from:       account?.address,
           ts:         Date.now(),
         });
-        const ecies = await eciesEncryptNote(dest, noteJson);
-        encryptedNote   = ecies.encryptedNote;
-        ephemeralPubKey = ecies.ephemeralPubKey;
+        const ecies = await eciesEncryptNoteForRecipient(dest, noteJson);
+        if (ecies) {
+          encryptedNote   = ecies.encryptedNote;
+          ephemeralPubKey = ecies.ephemeralPubKey;
+        }
       } catch(e) {
-        console.warn("[ECIES encrypt]", e.message);
-        // Fallback: use legacy clipboard method if ECIES fails
+        console.warn("[ECDH encrypt]", e.message);
+        // Fallback: recipient note stays local-only (existing manual-share behavior)
       }
     }
+
+    // ── Flat protocol fee (ShieldVault v2.4 — sendFlatFee, native USDC msg.value) ──
+    // Read before showing the confirm modal so the fee is disclosed up front.
+    // Defaults to 0 until governance opts in via setSendFlatFee — matches pre-v2.4
+    // behavior exactly when unset.
+    let sendFee = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.sendFlatFee }, "latest"]);
+      sendFee = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
 
     const confirmed = await askConfirm({
       label:  "Confidential Send",
       amount,
       token:  "USDC",
       to:     dest,
-      note:   encryptedNote
-        ? "Encrypted stealth note embedded in transaction — recipient's wallet will auto-decrypt on connect."
-        : "Private send — recipient address not linked to sender on-chain.",
+      note:   (encryptedNote
+        ? "Recipient has confidential receiving enabled — an encrypted note will be relayed on-chain so their wallet auto-discovers these funds. 2 transactions: shielded transfer, then note relay."
+        : "Private send — recipient hasn't enabled confidential receiving yet, so no auto-discovery note will be sent. 1 transaction.")
+        + (sendFee > 0n ? ` Flat protocol fee: ${formatToken(sendFee, 6)} USDC (paid separately, not from your shielded balance).` : ""),
     });
     if (!confirmed) { setLoading(false); return; }
 
-    let ok;
-    if (encryptedNote && ephemeralPubKey) {
-      // Use shieldedSendWithNote — emits StealthNoteEmitted event on-chain
-      const transferData = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut });
-      // Build shieldedSendWithNote calldata:
-      // selector(4) + TransferParams(dynamic) + address(32) + bytes encryptedNote(dynamic) + bytes ephemeralPubKey(dynamic)
-      const xferHex  = (transferData.data || "").slice(74); // strip "0x" + selector + buildShieldedSendCalldata's own leading self-offset word (only valid when TransferParams is the sole param — here it's nested as arg0 of 4, so that word must go too)
-      const destPad  = dest.replace("0x","").padStart(64,"0").toLowerCase();
-      const encBytes = hexToBytes(encryptedNote);
-      const ephBytes = hexToBytes(ephemeralPubKey);
-
-      // ABI encode the 3 additional args after TransferParams
-      // TransferParams is dynamic → outer offset + struct
-      // Then: address(32), offset_encNote, offset_ephPubKey, len_encNote, data_encNote, len_ephPubKey, data_ephPubKey
-      const encLen   = encBytes.length.toString(16).padStart(64,"0");
-      const encPad   = Array.from(encBytes).map(b=>b.toString(16).padStart(2,"0")).join("").padEnd(Math.ceil(encBytes.length/32)*64,"0");
-      const ephLen   = ephBytes.length.toString(16).padStart(64,"0");
-      const ephPad   = Array.from(ephBytes).map(b=>b.toString(16).padStart(2,"0")).join("").padEnd(Math.ceil(ephBytes.length/32)*64,"0");
-
-      // TransferParams offset = 0x80 (4 args head = 4×32 = 128 = 0x80), then offsets are relative to arg block start
-      // arg0 = TransferParams offset
-      // arg1 = address
-      // arg2 = bytes encryptedNote offset
-      // arg3 = bytes ephemeralPubKey offset
-      const transferParamsLen = xferHex.length / 2; // byte length of encoded TransferParams
-      const arg0 = (4 * 32).toString(16).padStart(64,"0"); // offset to TransferParams = 0x80
-      const arg1 = destPad;
-      const tpWords = Math.ceil(transferParamsLen / 32) * 32;
-      const baseAfterTP = 4 * 32 + tpWords; // offset after the 4-word head + TransferParams data
-      const arg2 = (baseAfterTP).toString(16).padStart(64,"0");             // offset to encNote
-      const arg3 = (baseAfterTP + 32 + Math.ceil(encBytes.length/32)*32).toString(16).padStart(64,"0"); // offset to ephPubKey
-
-      const calldata = "0x" + "d3c9406f" // shieldedSendWithNote selector
-        + arg0 + arg1 + arg2 + arg3      // 4-arg head
-        + xferHex                         // TransferParams encoding
-        + encLen + encPad                 // encryptedNote
-        + ephLen + ephPad;                // ephemeralPubKey
-
-      ok = await sendRealTx({
-        label: "Confidential Send",
-        description: `${amount} USDC → ${dest.slice(0,8)}… (ECIES encrypted stealth note)`,
-        buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data: calldata }),
-      });
-    } else {
-      // Fallback: standard shieldedSend (no stealth note)
-      const { data } = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut });
-      ok = await sendRealTx({
-        label: "Confidential Send",
-        description: `${amount} USDC → ${dest.slice(0,8)}… (shielded)`,
-        buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
-      });
-    }
+    // Tx 1: the actual shielded fund movement (ShieldVault selector 0x5635a2e7)
+    const { data, value } = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut, sendFlatFee: sendFee });
+    const ok = await sendRealTx({
+      label: "Confidential Send",
+      description: `${amount} USDC → ${dest.slice(0,8)}… (shielded)`,
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
+    });
 
     if (ok) {
       const updated = notes.filter(n => n.commitment !== note.commitment);
@@ -2476,13 +2546,22 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
       saveNotes(account?.address, updated);
 
-      // If self-send, immediately add note to local storage (no ECIES needed)
       if (isSelfSend) {
         notify("Confidential Send ✓", `${amount} USDC sent to your own shielded balance.`, "success");
       } else if (encryptedNote) {
+        // Tx 2: relay the encrypted note via ViewKeyRegistry — non-blocking on failure,
+        // funds already moved successfully in tx 1 regardless of this outcome.
+        const { data: noteData } = buildEmitNoteCalldata({ recipient: dest, encryptedNote, ephemeralPubKey });
+        const relayed = await sendRealTx({
+          label: "Confidential Send · Note Relay",
+          description: `Delivering encrypted note to ${dest.slice(0,8)}…`,
+          buildTx: () => ({ to: CONTRACTS.ViewKeyRegistry, value: "0x0", data: noteData }),
+        });
         notify(
           "Confidential Send ✓",
-          `${amount} USDC sent. Encrypted note embedded in transaction — recipient's wallet will auto-decrypt when they connect to PrivARC.`,
+          relayed
+            ? `${amount} USDC sent. Recipient's wallet will auto-decrypt and show these funds when they next connect to PrivARC.`
+            : `${amount} USDC sent. Note relay was not confirmed — share the recipient address manually so they can locate the transfer.`,
           "success"
         );
       } else {
@@ -2591,9 +2670,19 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       relayer: "0x0000000000000000000000000000000000000000",
     });
 
+    // ── Protocol fee preview (ShieldVault v2.4 — protocolFeeBps, skimmed from what's received) ──
+    let withdrawFee = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
+      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      withdrawFee = previewWithdrawFee(amountBig, bps).fee;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
     const ok = await sendRealTx({
       label: "Withdraw",
-      description: `${amount} USDC → ${sh(target)} from ShieldVault`,
+      description: withdrawFee > 0n
+        ? `${amount} USDC → ${sh(target)} (protocol fee: ${formatToken(withdrawFee, 6)} USDC, you receive ${formatToken(amountBig - withdrawFee, 6)} USDC)`
+        : `${amount} USDC → ${sh(target)} from ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
     });
 
@@ -2707,9 +2796,19 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       maxBridgeFee: 0n,
     });
 
+    // ── Protocol fee preview (ShieldVault v2.4 — bridgeFeeBps, retained in vault before CCTP) ──
+    let bridgeFee = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.bridgeFeeBps }, "latest"]);
+      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      bridgeFee = previewBridgeFee(amountBig, bps).fee;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
     const ok = await sendRealTx({
       label: `Bridge → ${ch.name}`,
-      description: `${amount} EURC → ${ch.name} via CCTP v2 (private)`,
+      description: bridgeFee > 0n
+        ? `${amount} EURC → ${ch.name} via CCTP v2 (protocol fee: ${formatToken(bridgeFee, 6)} EURC, ${formatToken(amountBig - bridgeFee, 6)} EURC bridged)`
+        : `${amount} EURC → ${ch.name} via CCTP v2 (private)`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
     });
 

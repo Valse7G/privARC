@@ -11,10 +11,10 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xDC920361131AddeC15A04070052169E941ae8D02",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0x35Fd13D2f6344D7C2069afDbf8FfD59CC3b181A4",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
-  Staking:             import.meta.env.VITE_STAKING               ?? "0x80C8247e602D78da93f318862B3d14026Be03505",
+  Staking:             import.meta.env.VITE_STAKING               ?? "0x0505Eba4fcEc8f08fad8C088086000A0E718b0D6",
   NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0xAbaADa4ac464f4D9f9195a874c9121FC0A53b212",
   MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x175C61212679376F0c210C1a5c4aC3A5E87fB372",
   DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xdd31d70c2Ce1B5b33Fe016569FEF99CeC8cAE34D",
@@ -24,6 +24,10 @@ const _c = {
   PrivateBridge:       import.meta.env.VITE_PRIVATE_BRIDGE        ?? "0x1C22eEb6c422BeF73B335e1E5668ec3109839B40",
   EmergencyController: import.meta.env.VITE_EMERGENCY_CONTROLLER  ?? "0xa788E96DcF4dBf348995bc5b8D0C7BbaD8e5e88F",
   MockVerifierZK:      import.meta.env.VITE_VERIFIER_ZK           ?? "0x83a34C5997c58c36A60855879ae24CC440430181",
+  // ViewKeyRegistry v1.0.0 — deployed 2026-06-20. Confidential-send auto-discovery
+  // (real ECDH stealth notes) is feature-gated on this being non-null — see
+  // DApp.jsx ensureViewKeyRegistered()/scanStealthNotes().
+  ViewKeyRegistry:     import.meta.env.VITE_VIEW_KEY_REGISTRY     ?? "0x590D1FDC3FbD4CAb151cb7E1557D9C4ecEa2C24b",
 };
 
 export const CONTRACTS = {
@@ -50,6 +54,7 @@ export const CONTRACTS = {
   PrivateBridge:       _c.PrivateBridge,
   EmergencyController: _c.EmergencyController,
   MockVerifierZK:      _c.MockVerifierZK,
+  ViewKeyRegistry:     _c.ViewKeyRegistry,
 };
 
 // ── Token config ──────────────────────────────────────────────────────────────
@@ -171,11 +176,24 @@ export const SEL = {
   claimRewards:       "0x372500ab",  // claimRewards()
   previewRewards:     "0xf166e920",  // previewRewards(address)
 
-  // Protocol fees (ShieldVault v2.3.1)
+  // Protocol fees (ShieldVault v2.4.0)
   feesCollectedByToken: "0xa2c169a7",  // feesCollectedByToken(address)
   withdrawFees:         "0x164e68de",  // withdrawFees(address)
-  protocolFeeBps:       "0x35659fb8",  // protocolFeeBps()
+  protocolFeeBps:       "0x35659fb8",  // protocolFeeBps() — deposit/withdraw
+  swapFeeBps:           "0x2ffdaf89",  // swapFeeBps()
+  bridgeFeeBps:         "0x4f6aa42b",  // bridgeFeeBps()
+  sendFlatFee:          "0xdc1f80fe",  // sendFlatFee() — 6-dec USDC units
   treasury:             "0x61d027b3",  // treasury()
+
+  // Protocol fees (Staking v1.1.0)
+  performanceFeeBps:    "0xb9d4e879",  // performanceFeeBps() — Staking contract
+
+  // ViewKeyRegistry v1.0.0 — real ECDH P-256 view keys for confidential-send auto-discovery
+  registerViewKey:    "0x4f9d2844",  // registerViewKey(bytes)
+  removeViewKey:      "0xe1e0e535",  // removeViewKey()
+  hasViewKey:         "0x9e0607f1",  // hasViewKey(address)
+  getViewKey:         "0xc1f5c989",  // getViewKey(address)
+  emitNote:           "0xdefb8b15",  // emitNote(address,bytes,bytes)
 };
 
 // ── ABI encoding primitives ───────────────────────────────────────────────────
@@ -190,6 +208,27 @@ export const encodeUint32 = (n) =>
 
 export const encodeBytes32 = (hex) =>
   hex.replace("0x", "").padEnd(64, "0");
+
+// Generic dynamic `bytes` encoder: returns { lenWord, dataWords, words }
+// suitable for inlining at a tail offset (length word + data padded to 32-byte boundary).
+// `hexOrBytes` may be a "0x..."-prefixed hex string or a Uint8Array.
+export const encodeBytes = (hexOrBytes) => {
+  const hex = hexOrBytes instanceof Uint8Array
+    ? Array.from(hexOrBytes).map(b => b.toString(16).padStart(2, "0")).join("")
+    : hexOrBytes.replace("0x", "");
+  const byteLen = hex.length / 2;
+  const lenWord = encodeUint256(BigInt(byteLen));
+  const dataWords = hex.padEnd(Math.ceil(byteLen / 32) * 64, "0");
+  return lenWord + dataWords; // length word followed by padded data — NOT including its own offset word
+};
+// Byte-length (not word count) of an encoded `bytes` blob as produced by encodeBytes(): 32 (length word) + padded data.
+export const encodedBytesSize = (hexOrBytes) => {
+  const hex = hexOrBytes instanceof Uint8Array
+    ? Array.from(hexOrBytes).map(b => b.toString(16).padStart(2, "0")).join("")
+    : hexOrBytes.replace("0x", "");
+  const byteLen = hex.length / 2;
+  return 32 + Math.ceil(byteLen / 32) * 32;
+};
 
 export const decodeUint256 = (hex) =>
   hex && hex !== "0x" && hex.length > 2 ? BigInt(hex) : 0n;
@@ -398,44 +437,83 @@ export function buildWithdrawCalldata({ nullifier, root, token, recipient, amoun
 //   [0x1e0] outputCommitments[0] = commitmentOut
 //   [0x200] publicInputs.length = 0
 
-export function buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut }) {
-  // Offsets from start of struct encoding:
-  // inputNullifiers at 0x180 (head=9 words for proof=8 + offsets: 3 offsets at 0,0x140,0x160 — wait, recalculate)
-  // Head = 3 dynamic offsets (inputNullifiers, outputCommitments, publicInputs) + 8 proof words + 1 merkleRoot
-  // = 12 words = 0x180
-  // tail starts at 0x180
-  // inputNullifiers offset: from struct start = 0x180
-  // outputCommitments offset: 0x180 + 2*32 = 0x1c0
-  // publicInputs offset: 0x1c0 + 2*32 = 0x200
-
-  const outerOff   = encodeUint256(0x20n);
+// Encodes the IShieldedTransfer.TransferParams struct body (head + tail, 17 words /
+// 0x220 bytes), WITHOUT the leading "offset to struct" word. Internal offsets inside
+// this blob are relative to the blob's own start, so this same blob is reusable both
+// as the sole argument (buildShieldedSendCalldata) and as one of several arguments
+// (buildShieldedSendWithNoteCalldata) — only the outer offset word differs per caller.
+function _encodeTransferParamsBlock({ nullifierIn, merkleRoot, commitmentOut }) {
+  // Head = 3 dynamic offsets (inputNullifiers, outputCommitments, publicInputs) + 8 proof words + 1 merkleRoot = 12 words = 0x180
   const offNullIn  = encodeUint256(0x180n);  // inputNullifiers array (from struct start)
   const offCmtOut  = encodeUint256(0x1c0n);  // outputCommitments (from struct start)
   const offPubIn   = encodeUint256(0x200n);  // publicInputs (from struct start)
 
-  const data = SEL.shieldedSend
-    + outerOff
-    // struct head:
-    + offNullIn                       // [0x00] offset to inputNullifiers
-    + PROOF_A_X                       // [0x20] proof.a[0]
-    + PROOF_A_Y                       // [0x40] proof.a[1]
-    + PROOF_B_X0                      // [0x60] proof.b[0][0]
-    + PROOF_B_X1                      // [0x80] proof.b[0][1]
-    + PROOF_B_Y0                      // [0xa0] proof.b[1][0]
-    + PROOF_B_Y1                      // [0xc0] proof.b[1][1]
-    + PROOF_C_X                       // [0xe0] proof.c[0]
-    + PROOF_C_Y                       // [0x100] proof.c[1]
-    + encodeBytes32(merkleRoot)       // [0x120] merkleRoot (static)
-    + offCmtOut                       // [0x140] offset to outputCommitments
-    + offPubIn                        // [0x160] offset to publicInputs
-    // struct tail:
-    + encodeUint256(1n)               // [0x180] inputNullifiers.length = 1
-    + encodeBytes32(nullifierIn)      // [0x1a0] inputNullifiers[0]
-    + encodeUint256(1n)               // [0x1c0] outputCommitments.length = 1
-    + encodeBytes32(commitmentOut)    // [0x1e0] outputCommitments[0]
-    + encodeUint256(0n);              // [0x200] publicInputs.length = 0
+  return (
+    offNullIn                       // [0x00] offset to inputNullifiers
+    + PROOF_A_X                     // [0x20] proof.a[0]
+    + PROOF_A_Y                     // [0x40] proof.a[1]
+    + PROOF_B_X0                    // [0x60] proof.b[0][0]
+    + PROOF_B_X1                    // [0x80] proof.b[0][1]
+    + PROOF_B_Y0                    // [0xa0] proof.b[1][0]
+    + PROOF_B_Y1                    // [0xc0] proof.b[1][1]
+    + PROOF_C_X                     // [0xe0] proof.c[0]
+    + PROOF_C_Y                     // [0x100] proof.c[1]
+    + encodeBytes32(merkleRoot)     // [0x120] merkleRoot (static)
+    + offCmtOut                     // [0x140] offset to outputCommitments
+    + offPubIn                      // [0x160] offset to publicInputs
+    // tail:
+    + encodeUint256(1n)             // [0x180] inputNullifiers.length = 1
+    + encodeBytes32(nullifierIn)    // [0x1a0] inputNullifiers[0]
+    + encodeUint256(1n)             // [0x1c0] outputCommitments.length = 1
+    + encodeBytes32(commitmentOut)  // [0x1e0] outputCommitments[0]
+    + encodeUint256(0n)             // [0x200] publicInputs.length = 0
+  );
+  // Total: 17 words = 0x220 bytes
+}
+const TRANSFER_PARAMS_BLOCK_SIZE = 0x220; // bytes
 
-  return { data, value: "0x0" };
+export function buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut, sendFlatFee }) {
+  const outerOff = encodeUint256(0x20n);
+  const block = _encodeTransferParamsBlock({ nullifierIn, merkleRoot, commitmentOut });
+  return { data: SEL.shieldedSend + outerOff + block, value: sendFeeValueHex(sendFlatFee) };
+}
+
+// ─── SHIELDED SEND WITH STEALTH NOTE ──────────────────────────────────────────
+// ShieldVault.shieldedSendWithNote(TransferParams params, address recipient, bytes encryptedNote, bytes ephemeralPubKey)
+//
+// ABI: shieldedSendWithNote((bytes32[],(uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32[],uint256[]),address,bytes,bytes)
+//
+// 4 top-level args. Head = 4 words (0x80):
+//   [0x00] offset to params (= 0x80, right after this head)
+//   [0x20] recipient address (static, inlined)
+//   [0x40] offset to encryptedNote
+//   [0x60] offset to ephemeralPubKey
+// Then at 0x80: the 17-word TransferParams block (identical encoding to buildShieldedSendCalldata's blob)
+// Then: encryptedNote (length + padded data), then ephemeralPubKey (length + padded data)
+//
+// NOTE: requires ShieldVault v2.3+ deployed (selector 0xd3c9406f). On the currently
+// deployed v2.2 contract this selector does not exist and the call will revert with 0x.
+// PrivARC OS's primary confidential-send path uses ViewKeyRegistry.emitNote() instead
+// (see buildEmitNoteCalldata below), which works against ShieldVault v2.2 unmodified.
+// This builder is kept for the day ShieldVault is redeployed to v2.3 (atomic single-tx
+// fund-move + note-emit). Not currently called by DApp.jsx.
+export function buildShieldedSendWithNoteCalldata({ nullifierIn, merkleRoot, commitmentOut, recipient, encryptedNote, ephemeralPubKey, sendFlatFee }) {
+  const block = _encodeTransferParamsBlock({ nullifierIn, merkleRoot, commitmentOut });
+
+  const offParams = encodeUint256(0x80n); // right after the 4-word head
+  const offEncNote = encodeUint256(BigInt(0x80 + TRANSFER_PARAMS_BLOCK_SIZE));
+  const offEphPub  = encodeUint256(BigInt(0x80 + TRANSFER_PARAMS_BLOCK_SIZE + encodedBytesSize(encryptedNote)));
+
+  const data = SEL.shieldedSendWithNote
+    + offParams
+    + encodeAddress(recipient)
+    + offEncNote
+    + offEphPub
+    + block
+    + encodeBytes(encryptedNote)
+    + encodeBytes(ephemeralPubKey);
+
+  return { data, value: sendFeeValueHex(sendFlatFee) };
 }
 
 // ─── PRIVATE SWAP ─────────────────────────────────────────────────────────────
@@ -581,6 +659,103 @@ export function randomBytes32() {
   return "0x" + Array.from(crypto.getRandomValues(new Uint8Array(32)))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+// ─── PROTOCOL FEE PREVIEWS ────────────────────────────────────────────────────
+// Mirrors ShieldVault v2.4's on-chain fee math exactly, so the UI can show an
+// accurate "you'll pay X in fees" BEFORE the user signs anything. All four rates
+// default to 0 until governance opts in (see ShieldVault.sol v2.4 changelog).
+export const MIN_DEPOSIT_FEE = 30_000n; // 0.03 USDC (6-dec) — matches the on-chain constant
+
+// fee = max(amount * bps / 10000, MIN_DEPOSIT_FEE), only if it doesn't consume the whole amount
+export function previewDepositFee(amountUnits, protocolFeeBps) {
+  const amount = BigInt(amountUnits);
+  const bps = BigInt(protocolFeeBps || 0);
+  const bpsFee = (amount * bps) / 10_000n;
+  let fee = bpsFee > MIN_DEPOSIT_FEE ? bpsFee : MIN_DEPOSIT_FEE;
+  if (fee >= amount) fee = 0n;
+  return { fee, net: amount - fee };
+}
+
+// fee = withdrawAmt * bps / 10000 (no floor)
+export function previewWithdrawFee(amountUnits, protocolFeeBps) {
+  const amount = BigInt(amountUnits);
+  const fee = (amount * BigInt(protocolFeeBps || 0)) / 10_000n;
+  return { fee, net: amount - fee };
+}
+
+// fee = grossOut * bps / 10000 — PrivARC's own cut, separate from the underlying DEX's LP fee
+export function previewSwapFee(grossOutUnits, swapFeeBps) {
+  const gross = BigInt(grossOutUnits);
+  const fee = (gross * BigInt(swapFeeBps || 0)) / 10_000n;
+  return { fee, net: gross - fee };
+}
+
+// fee = amount * bps / 10000 — only (amount - fee) is actually bridged via CCTP
+export function previewBridgeFee(amountUnits, bridgeFeeBps) {
+  const amount = BigInt(amountUnits);
+  const fee = (amount * BigInt(bridgeFeeBps || 0)) / 10_000n;
+  return { fee, net: amount - fee };
+}
+
+// Confidential send: flat fee only (no %), paid as native-USDC msg.value alongside
+// shieldedSend/shieldedSendWithNote — see ShieldVault.sol v2.4 changelog for why a
+// percentage fee isn't possible here without revealing the shielded amount.
+export function sendFeeValueHex(sendFlatFeeUnits) {
+  const wei = BigInt(sendFlatFeeUnits || 0) * 1_000_000_000_000n; // 6-dec → 18-dec wei
+  return "0x" + wei.toString(16);
+}
+
+// ─── VIEW KEY REGISTRY ────────────────────────────────────────────────────────
+// ViewKeyRegistry.sol — real ECDH P-256 view keys for confidential-send auto-discovery.
+// See contracts/ViewKeyRegistry.sol for full design notes. All four functions below
+// are simple single-arg calls — no nested structs, so encoding is straightforward.
+
+// registerViewKey(bytes publicKey) — publicKey is the raw 65-byte uncompressed P-256 point
+export function buildRegisterViewKeyCalldata(publicKeyHex) {
+  const offset = encodeUint256(0x20n);
+  return { data: SEL.registerViewKey + offset + encodeBytes(publicKeyHex), value: "0x0" };
+}
+
+// removeViewKey() — no args
+export function buildRemoveViewKeyCalldata() {
+  return { data: SEL.removeViewKey, value: "0x0" };
+}
+
+// hasViewKey(address owner) view returns (bool) — for eth_call
+export function buildHasViewKeyCall(owner) {
+  return SEL.hasViewKey + encodeAddress(owner);
+}
+
+// getViewKey(address owner) view returns (bytes) — for eth_call
+export function buildGetViewKeyCall(owner) {
+  return SEL.getViewKey + encodeAddress(owner);
+}
+
+// emitNote(address recipient, bytes encryptedNote, bytes ephemeralPubKey)
+// 3 args: recipient (static), encryptedNote (dynamic), ephemeralPubKey (dynamic)
+// Head = 3 words (0x60): [recipient][offsetEncNote][offsetEphPub]
+export function buildEmitNoteCalldata({ recipient, encryptedNote, ephemeralPubKey }) {
+  const offEncNote = encodeUint256(0x60n);
+  const offEphPub  = encodeUint256(BigInt(0x60 + encodedBytesSize(encryptedNote)));
+  const data = SEL.emitNote
+    + encodeAddress(recipient)
+    + offEncNote
+    + offEphPub
+    + encodeBytes(encryptedNote)
+    + encodeBytes(ephemeralPubKey);
+  return { data, value: "0x0" };
+}
+
+// Decode a `bytes` eth_call return value (offset + length + data) into a "0x..." hex string.
+// Returns null for an empty/unregistered result.
+export function decodeBytesReturn(hex) {
+  if (!hex || hex === "0x" || hex.length < 2 + 64) return null;
+  const clean = hex.replace("0x", "");
+  // Standard ABI: [offset(32)][length(32)][data...]
+  const len = parseInt(clean.slice(64, 128), 16);
+  if (!len) return null;
+  return "0x" + clean.slice(128, 128 + len * 2);
 }
 
 // ─── CCTP DESTINATION DOMAINS ────────────────────────────────────────────────
