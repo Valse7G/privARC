@@ -9,7 +9,8 @@ import {
   buildApproveCalldata, buildStakeCalldata, needsApproveBeforeDeposit,
   randomBytes32, buildGetLastRootCall,
   buildRegisterViewKeyCalldata, buildHasViewKeyCall, buildGetViewKeyCall,
-  buildEmitNoteCalldata, decodeBytesReturn,
+  buildEmitNoteCalldata, decodeBytesReturn, decodeStringReturn,
+  buildTotalVolumeByTokenCall,
   previewDepositFee, previewWithdrawFee, previewSwapFee, previewBridgeFee, sendFeeValueHex,
 } from "./contracts.js";
 
@@ -1515,33 +1516,47 @@ function useProtocolStats(onArc) {
   useEffect(() => {
     if (!onArc) return;
     const fetch = async () => {
-      const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
-      // FIX: Promise.all rejects entirely if ANY single call fails — with 17 calls in
-      // flight, one bad RPC response (or a v2.5-only function read against a stale
-      // contract) used to blank out EVERYTHING, including pauseState, which then
-      // displayed as "🔴 PAUSED" even though the vault was never actually paused.
-      // Promise.allSettled isolates each call so a single failure only loses that
-      // one stat, not the whole panel.
-      const calls = [
-        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
-        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
-        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
-        () => call(CONTRACTS.MerkleTreeManager,   SEL.nextLeafIndex),
-        () => call(CONTRACTS.EmergencyController, SEL.pauseState),
-        () => call(CONTRACTS.EmergencyController, SEL.depositsAllowed),
-        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
-        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
-        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
-        () => call(CONTRACTS.ShieldVault, SEL.VERSION),
-        () => call(CONTRACTS.ShieldVault, SEL.totalTxCount),
-        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.USDC)),
-        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.EURC)),
-        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.cirBTC)),
-        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
-        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
-        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
-      ];
-      const results = await Promise.allSettled(calls.map(fn => fn()));
+      try {
+        const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
+        // FIX: Promise.all rejects entirely if ANY single call fails — with 17 calls in
+        // flight, one bad RPC response (or a v2.5-only function read against a stale
+        // contract) used to blank out EVERYTHING, including pauseState, which then
+        // displayed as "🔴 PAUSED" even though the vault was never actually paused.
+        // Promise.allSettled isolates each call so a single failure only loses that
+        // one stat, not the whole panel.
+        //
+        // This whole block is ALSO wrapped in try/catch (not just allSettled) because
+        // a SYNCHRONOUS throw while constructing the calls array — e.g. a missing
+        // import making one of these builder functions undefined — happens before
+        // any promise exists and bypasses allSettled entirely. That exact bug shipped
+        // once already (buildTotalVolumeByTokenCall/decodeStringReturn were used here
+        // but never imported) and silently zeroed out the whole panel every poll with
+        // no visible error short of an uncaught rejection in devtools. Never again.
+        const calls = [
+          () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
+          () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
+          () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
+          () => call(CONTRACTS.MerkleTreeManager,   SEL.nextLeafIndex),
+          () => call(CONTRACTS.EmergencyController, SEL.pauseState),
+          () => call(CONTRACTS.EmergencyController, SEL.depositsAllowed),
+          () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
+          () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
+          () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
+          () => call(CONTRACTS.ShieldVault, SEL.VERSION),
+          () => call(CONTRACTS.ShieldVault, SEL.totalTxCount),
+          () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.USDC)),
+          () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.EURC)),
+          () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.cirBTC)),
+          () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
+          () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
+          () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
+        ];
+        // Each entry wrapped individually too: a synchronous throw from any ONE
+        // builder function (e.g. an undefined import) now only nulls that ONE call
+        // instead of aborting calls.map() entirely and skipping every call after it.
+        const results = await Promise.allSettled(
+          calls.map(fn => { try { return fn(); } catch (e) { return Promise.reject(e); } })
+        );
       const v = (i) => results[i].status === "fulfilled" ? results[i].value : null;
       const [
         su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
@@ -1575,6 +1590,12 @@ function useProtocolStats(onArc) {
         feesEurc:   feeE != null ? decodeUint256(feeE) : prev.feesEurc,
         feesBtc:    feeB != null ? decodeUint256(feeB) : prev.feesBtc,
       }));
+      } catch (e) {
+        // Catches synchronous throws too (missing imports, undefined refs, etc.) —
+        // not just promise rejections. Previous values are kept as-is (setStats
+        // simply isn't called), so a crash here never blanks the panel.
+        console.warn("stats fetch crashed:", e);
+      }
     };
     fetch();
     const id = setInterval(fetch, 10000);
@@ -3058,7 +3079,6 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
 
   // ── Protocol fees — persistent ──────────────────────────────────────────
   const FEES_KEY = "privarc_protocol_fees";
-  const PROTOCOL_FEE_BPS = 0;
 
   const [stats24h, setStats24h] = useState(() => {
     try {
@@ -3115,9 +3135,26 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
           } catch {}
         }
 
-        // All-time volume = TVL is a lower bound; fees = 0.03 × allTimeTxCount
-        const FIXED_FEE = 0.03; // USDC per deposit
-        const feesFromCount = allTimeTxCount * FIXED_FEE;
+        // ── 24h fees: decode real FeeCollected events, don't guess ──────────
+        // FIX: this used to assume every tx costs a flat 0.03 USDC (cnt24 * 0.03),
+        // which became wrong the moment protocolFeeBps became configurable (v2.4)
+        // and especially once deposits became fee-free by default (v2.6). Decode
+        // the actual amount from each FeeCollected(token indexed, amount, treasury)
+        // log instead — accurate regardless of whatever rate is currently set.
+        const FEE_COLLECTED_TOPIC = "0x36119f4f28ae3384ed31589f21ec2992cb0ebe53b11c79a24466ee74471764ed";
+        let fees24 = 0;
+        for (const log of logs24) {
+          try {
+            if (!log.topics || log.topics[0]?.toLowerCase() !== FEE_COLLECTED_TOPIC) continue;
+            const tokenAddr = "0x" + (log.topics[1] || "").slice(-40);
+            const d = (log.data || "").replace("0x","");
+            if (d.length < 64) continue;
+            const amountRaw = BigInt("0x" + d.slice(0, 64));
+            const dec = tokenAddr.toLowerCase() === CONTRACTS.cirBTC.toLowerCase() ? 1e8 : 1e6;
+            const a = Number(amountRaw) / dec;
+            if (isFinite(a) && a >= 0) fees24 += a;
+          } catch {}
+        }
 
         const persisted = {
           allTimeVolume:  vol24 > 0 ? vol24.toFixed(2) : null,
@@ -3130,7 +3167,7 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
         setStats24h({
           txCount:        cnt24,
           volume:         vol24.toFixed(2),
-          fees:           (cnt24 * FIXED_FEE).toFixed(4),
+          fees:           fees24.toFixed(4),
           allTimeVolume:  vol24.toFixed(2),
           allTimeFees:    totalFeesCollected.toFixed(4),
           allTimeTxCount: allTimeTxCount,
@@ -3143,6 +3180,26 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
     const id = setInterval(run, 30000);
     return () => clearInterval(id);
   }, [onArc]);
+
+  // ── Live fee rate + treasury (was hardcoded "0.03 USDC/tx" — stale since the
+  //     v2.6 fix made deposits fee-free by default; now reads the real on-chain rate) ──
+  const [feeConfig, setFeeConfig] = useState({ bps: null, treasury: null });
+  useEffect(() => {
+    if (!onArc) return;
+    const run = () => Promise.all([
+      rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]).catch(() => null),
+      rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.treasury }, "latest"]).catch(() => null),
+    ]).then(([bpsRes, treasuryRes]) => {
+      setFeeConfig({
+        bps:      bpsRes && bpsRes !== "0x" ? Number(BigInt(bpsRes)) : null,
+        treasury: treasuryRes && treasuryRes !== "0x" ? "0x" + treasuryRes.slice(-40) : null,
+      });
+    }).catch(() => {});
+    run();
+    const id = setInterval(run, 30000);
+    return () => clearInterval(id);
+  }, [onArc]);
+  const feeRateLabel = feeConfig.bps == null ? "loading…" : feeConfig.bps === 0 ? "Free (launch phase)" : `${(feeConfig.bps/100).toFixed(2)}%`;
 
   // ── Sparkline builder — fully NaN-safe ──────────────────────────────────
   const mkSpk = (rawData, col, label, fmt = v => String(v), realValue = null) => {
@@ -3262,15 +3319,15 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
       <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(251,191,36,.12)", borderRadius:5, padding:"11px 13px", marginBottom:8 }}>
         <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
           <div style={{ fontSize:8, color:"#fbbf24", letterSpacing:".14em", fontFamily:"monospace" }}>⚡ PROTOCOL FEES — ALL TIME</div>
-          <div style={{ fontSize:7, color:"#64748b", fontFamily:"monospace" }}>0.03 USDC/tx · live</div>
+          <div style={{ fontSize:7, color:"#64748b", fontFamily:"monospace" }}>{feeRateLabel} · live</div>
         </div>
         {[
           { l:"Total Tx (deposits)",  v: stats24h.allTimeTxCount!=null ? String(stats24h.allTimeTxCount) : "loading…", c:"#0EA5E9" },
           { l:"Fees (USDC)",          v: stats24h.feesUsdc!=null ? "$"+stats24h.feesUsdc.toFixed(4) : "loading…",   c:"#00FFB0" },
           { l:"Fees (EURC)",          v: stats24h.feesEurc!=null ? "€"+stats24h.feesEurc.toFixed(4) : "loading…",   c:"#60a5fa" },
           { l:"Total Collected",      v: stats24h.allTimeFees!=null ? "$"+safeFmt(stats24h.allTimeFees,4) : "loading…", c:"#fbbf24" },
-          { l:"Fee Rate",             v: "0.03 USDC / deposit",                                                        c:"#64748b" },
-          { l:"Treasury",             v: "Deployer / treasury address",                                                 c:"#64748b" },
+          { l:"Fee Rate (deposit/withdraw)", v: feeRateLabel,                                                       c:"#64748b" },
+          { l:"Treasury",             v: feeConfig.treasury ? feeConfig.treasury.slice(0,6)+"…"+feeConfig.treasury.slice(-4) : "loading…", c:"#64748b" },
         ].map(s=>(
           <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
             <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
