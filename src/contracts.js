@@ -11,7 +11,7 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xE3131D3d3AcBb9d28867600b4D42Ac60eB357638",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xc4e5307e9b719cB8fFC29F8aae96D2CC56960Cbd",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
   Staking:             import.meta.env.VITE_STAKING               ?? "0x0505Eba4fcEc8f08fad8C088086000A0E718b0D6",
@@ -676,9 +676,12 @@ export const MIN_DEPOSIT_FEE = 30_000n; // 0.03 USDC (6-dec) — matches the on-
 export function previewDepositFee(amountUnits, protocolFeeBps) {
   const amount = BigInt(amountUnits);
   const bps = BigInt(protocolFeeBps || 0);
-  const bpsFee = (amount * bps) / 10_000n;
-  let fee = bpsFee > MIN_DEPOSIT_FEE ? bpsFee : MIN_DEPOSIT_FEE;
-  if (fee >= amount) fee = 0n;
+  let fee = 0n;
+  if (bps > 0n) {
+    const bpsFee = (amount * bps) / 10_000n;
+    fee = bpsFee > MIN_DEPOSIT_FEE ? bpsFee : MIN_DEPOSIT_FEE;
+    if (fee >= amount) fee = 0n;
+  }
   return { fee, net: amount - fee };
 }
 

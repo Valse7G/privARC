@@ -1515,52 +1515,66 @@ function useProtocolStats(onArc) {
   useEffect(() => {
     if (!onArc) return;
     const fetch = async () => {
-      try {
-        const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
-        const [
-          su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
-          ver, txCount, volU, volE, volB, feeU, feeE, feeB,
-        ] = await Promise.all([
-          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
-          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
-          call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
-          call(CONTRACTS.MerkleTreeManager,   SEL.nextLeafIndex),
-          call(CONTRACTS.EmergencyController, SEL.pauseState),
-          call(CONTRACTS.EmergencyController, SEL.depositsAllowed),
-          // Pre-flight: check registered tokens in DepositManager
-          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
-          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
-          call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
-          // Live protocol stats (item 1 + item 4) — ShieldVault v2.5+
-          call(CONTRACTS.ShieldVault, SEL.VERSION),
-          call(CONTRACTS.ShieldVault, SEL.totalTxCount),
-          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.USDC)),
-          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.EURC)),
-          call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.cirBTC)),
-          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
-          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
-          call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
-        ]);
-        setStats({
-          shieldedUsdc:    decodeUint256(su),
-          shieldedEurc:    decodeUint256(se),
-          shieldedBtc:     decodeUint256(sb),
-          leafCount:       decodeUint256(leaf),
-          pauseState:      decodeUint8(pause),
-          depositsAllowed: decodeUint8(depsOk) !== 0,
-          tokenSupport: {
-            [CONTRACTS.USDC]:   tUsdc && tUsdc !== "0x" && BigInt(tUsdc) === 1n,
-            [CONTRACTS.EURC]:   tEurc && tEurc !== "0x" && BigInt(tEurc) === 1n,
-            [CONTRACTS.cirBTC]: tBtc  && tBtc  !== "0x" && BigInt(tBtc)  === 1n,
-          },
-          // Falls back to "2.4.0" (last hardcoded version) if ShieldVault predates
-          // VERSION() — i.e. talking to an old, not-yet-redeployed contract.
-          version:      decodeStringReturn(ver) || "2.4.0",
-          totalTxCount: decodeUint256(txCount),
-          volumeUsdc: decodeUint256(volU), volumeEurc: decodeUint256(volE), volumeBtc: decodeUint256(volB),
-          feesUsdc:   decodeUint256(feeU), feesEurc:   decodeUint256(feeE), feesBtc:   decodeUint256(feeB),
-        });
-      } catch(e) { console.warn("stats fetch:", e); }
+      const call = (to, data) => rpcCall("eth_call", [{ to, data }, "latest"]);
+      // FIX: Promise.all rejects entirely if ANY single call fails — with 17 calls in
+      // flight, one bad RPC response (or a v2.5-only function read against a stale
+      // contract) used to blank out EVERYTHING, including pauseState, which then
+      // displayed as "🔴 PAUSED" even though the vault was never actually paused.
+      // Promise.allSettled isolates each call so a single failure only loses that
+      // one stat, not the whole panel.
+      const calls = [
+        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.USDC)),
+        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.EURC)),
+        () => call(CONTRACTS.ShieldVault,     SEL.totalShielded + encodeAddress(CONTRACTS.cirBTC)),
+        () => call(CONTRACTS.MerkleTreeManager,   SEL.nextLeafIndex),
+        () => call(CONTRACTS.EmergencyController, SEL.pauseState),
+        () => call(CONTRACTS.EmergencyController, SEL.depositsAllowed),
+        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.USDC)),
+        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.EURC)),
+        () => call(CONTRACTS.DepositManager, SEL.isTokenSupported + encodeAddress(CONTRACTS.cirBTC)),
+        () => call(CONTRACTS.ShieldVault, SEL.VERSION),
+        () => call(CONTRACTS.ShieldVault, SEL.totalTxCount),
+        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.USDC)),
+        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.EURC)),
+        () => call(CONTRACTS.ShieldVault, buildTotalVolumeByTokenCall(CONTRACTS.cirBTC)),
+        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
+        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
+        () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
+      ];
+      const results = await Promise.allSettled(calls.map(fn => fn()));
+      const v = (i) => results[i].status === "fulfilled" ? results[i].value : null;
+      const [
+        su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
+        ver, txCount, volU, volE, volB, feeU, feeE, feeB,
+      ] = results.map((_, i) => v(i));
+
+      const failed = results.filter(r => r.status === "rejected");
+      if (failed.length) console.warn(`stats fetch: ${failed.length}/${results.length} calls failed`, failed[0].reason);
+
+      setStats(prev => ({
+        shieldedUsdc:    su   != null ? decodeUint256(su)   : prev.shieldedUsdc,
+        shieldedEurc:    se   != null ? decodeUint256(se)   : prev.shieldedEurc,
+        shieldedBtc:     sb   != null ? decodeUint256(sb)   : prev.shieldedBtc,
+        leafCount:       leaf != null ? decodeUint256(leaf) : prev.leafCount,
+        // pauseState specifically: keep previous value rather than null on failure —
+        // null was being interpreted as "paused" by the UI (null !== 0). A transient
+        // RPC hiccup should never visually flip the vault into "paused".
+        pauseState:      pause != null ? decodeUint8(pause) : prev.pauseState,
+        depositsAllowed: depsOk != null ? decodeUint8(depsOk) !== 0 : prev.depositsAllowed,
+        tokenSupport: {
+          [CONTRACTS.USDC]:   tUsdc != null && tUsdc !== "0x" ? BigInt(tUsdc) === 1n : prev.tokenSupport[CONTRACTS.USDC],
+          [CONTRACTS.EURC]:   tEurc != null && tEurc !== "0x" ? BigInt(tEurc) === 1n : prev.tokenSupport[CONTRACTS.EURC],
+          [CONTRACTS.cirBTC]: tBtc  != null && tBtc  !== "0x" ? BigInt(tBtc)  === 1n : prev.tokenSupport[CONTRACTS.cirBTC],
+        },
+        version:      ver != null ? (decodeStringReturn(ver) || prev.version) : prev.version,
+        totalTxCount: txCount != null ? decodeUint256(txCount) : prev.totalTxCount,
+        volumeUsdc: volU != null ? decodeUint256(volU) : prev.volumeUsdc,
+        volumeEurc: volE != null ? decodeUint256(volE) : prev.volumeEurc,
+        volumeBtc:  volB != null ? decodeUint256(volB) : prev.volumeBtc,
+        feesUsdc:   feeU != null ? decodeUint256(feeU) : prev.feesUsdc,
+        feesEurc:   feeE != null ? decodeUint256(feeE) : prev.feesEurc,
+        feesBtc:    feeB != null ? decodeUint256(feeB) : prev.feesBtc,
+      }));
     };
     fetch();
     const id = setInterval(fetch, 10000);
@@ -2126,7 +2140,7 @@ function useTxSend({ account, onArc, notify, refreshBalance }) {
   return { sendRealTx };
 }
 
-function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, protocolStats, prices }) {
+function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, protocolStats, prices, recomputeShielded }) {
   const [amount, setAmount] = useState("");
   const [tokenIdx, setTokenIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -2246,6 +2260,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       const notes = getNotes(account?.address);
       notes.push(note);
       saveNotes(account?.address, notes);
+      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
 
       // ── Item 2B: self-addressed encrypted note (cross-device reconstruction) ──
       const backedUp = await relaySelfNote({
@@ -2270,7 +2285,10 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   const tvlUsdc  = ps?.shieldedUsdc  != null ? "$"+(Number(ps.shieldedUsdc)/1e6).toFixed(2)  : "—";
   const tvlEurc  = ps?.shieldedEurc  != null ? "€"+(Number(ps.shieldedEurc)/1e6).toFixed(2)  : "—";
   const tvlBtc   = ps?.shieldedBtc   != null ? "₿"+(Number(ps.shieldedBtc)/1e8).toFixed(4)   : "—";
-  const vaultOk  = ps?.pauseState === 0;
+  // FIX: null (never successfully fetched) is NOT the same as "paused" — a transient
+  // RPC failure used to display as 🔴 PAUSED even though the vault was fine and
+  // deposits/withdrawals kept succeeding. Three explicit states now: unknown/active/paused.
+  const vaultState = ps?.pauseState == null ? "unknown" : ps.pauseState === 0 ? "active" : "paused";
   const leafCnt  = ps?.leafCount != null ? ps.leafCount.toString() : "—";
 
   // ── Item 4: USD-blended protocol-wide totals across ALL tokens ─────────────
@@ -2313,7 +2331,8 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
           { l:"TVL EURC",    v:tvlEurc,  c:"#4ade80" },
           { l:"TVL cirBTC",  v:tvlBtc,   c:"#F7931A" },
           { l:"COMMITMENTS", v:leafCnt,  c:"#a78bfa" },
-          { l:"VAULT",       v:vaultOk?"🟢 ACTIVE":"🔴 PAUSED", c:vaultOk?"#4ade80":"#f87171" },
+          { l:"VAULT",       v: vaultState==="active" ? "🟢 ACTIVE" : vaultState==="paused" ? "🔴 PAUSED" : "⚪ —",
+                              c: vaultState==="active" ? "#4ade80"   : vaultState==="paused" ? "#f87171"   : "#64748b" },
           { l:"VERSION",     v:ps?.version ? "v"+ps.version : "—", c:"#64748b" },
           { l:"PROTOCOL TXS",  v:ps?.totalTxCount != null ? ps.totalTxCount.toString() : "—", c:"#38bdf8" },
           { l:"VOLUME (TOTAL)", v:protocolVolumeUsd, c:"#facc15" },
@@ -2487,6 +2506,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       const outAmount = BigInt(Math.round(Number(q.out) * 1e6));
       updated.push({ commitment: commitmentOut, amount: outAmount.toString(), token: tokenOutAddr, ts: Date.now() });
       saveNotes(account?.address, updated);
+      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
 
       // ── Item 2B: self-addressed encrypted note (cross-device reconstruction) ──
       const backedUp = await relaySelfNote({
@@ -2548,7 +2568,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
   );
 }
 
-function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals }) {
+function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const [mode, setMode]=useState("shielded");
   const [confirmTx, setConfirmTx] = useState(null);
@@ -2668,6 +2688,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       // this is NOT self-relayed via ViewKeyRegistry).
       updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
       saveNotes(account?.address, updated);
+      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly; this is why the sender's displayed balance wasn't dropping after a confidential send
 
       if (isSelfSend) {
         notify("Confidential Send ✓", `${amount} USDC sent to your own shielded balance.`, "success");
@@ -2743,7 +2764,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   );
 }
 
-function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals }) {
+function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const [amount, setAmount]=useState(""); const [dest, setDest]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
@@ -2823,6 +2844,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
         });
       }
       saveNotes(account?.address, updated);
+      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
     }
 
     setAmount(""); setDest(""); setLoading(false);
@@ -2854,7 +2876,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
   );
 }
 
-function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals }) {
+function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]=useState(0); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
@@ -2962,6 +2984,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         });
       }
       saveNotes(account?.address, updated);
+      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
       notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.${remaining>0n ? (backedUp ? " Change note backed up on-chain." : "") : ""}`, "success");
     }
 
