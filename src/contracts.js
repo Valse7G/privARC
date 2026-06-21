@@ -14,7 +14,7 @@ const _c = {
   ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xc4e5307e9b719cB8fFC29F8aae96D2CC56960Cbd",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
-  Staking:             import.meta.env.VITE_STAKING               ?? "0x0505Eba4fcEc8f08fad8C088086000A0E718b0D6",
+  Staking:             import.meta.env.VITE_STAKING               ?? "0x28f6c47F9cF91ffE8Df0a67C252D711852c9188F",
   NullifierRegistry:   import.meta.env.VITE_NULLIFIER_REGISTRY    ?? "0xAbaADa4ac464f4D9f9195a874c9121FC0A53b212",
   MerkleTreeManager:   import.meta.env.VITE_MERKLE_TREE_MANAGER   ?? "0x175C61212679376F0c210C1a5c4aC3A5E87fB372",
   DepositManager:      import.meta.env.VITE_DEPOSIT_MANAGER       ?? "0xdd31d70c2Ce1B5b33Fe016569FEF99CeC8cAE34D",

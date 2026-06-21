@@ -1505,6 +1505,70 @@ function OverviewPanel({ account, usdcBalance, loadingBal, onArc, setPanel, pric
    VERSION is read on-chain (not hardcoded) so this never drifts out of sync
    after a ShieldVault redeploy — see ShieldVault.sol VERSION constant.
 ═══════════════════════════════════════════════════════════════ */
+// ── Local snapshot-based 24h deltas ─────────────────────────────────────────
+// FIX: "Last 24h" stats used to come from a single eth_getLogs call spanning
+// ~172,800 blocks (24h at Arc Testnet's ~0.5s block time) in ONE request. Most
+// RPC providers cap eth_getLogs block ranges (commonly 2,000–10,000 blocks) —
+// a request this wide is very likely rejected, and the catch block swallowed
+// the failure with zero logging, silently showing 0/0.00/0.0000 forever.
+//
+// Instead of chunking/retrying a fragile log scan, this reuses the reliable
+// on-chain STATE COUNTERS already being polled every 10s (totalTxCount,
+// totalVolumeByToken, feesCollectedByToken — added in ShieldVault v2.5/v2.6)
+// and snapshots them locally over time. A "24h delta" is just
+// current_value − value_from_a_snapshot_~24h_ago. No eth_getLogs, no block-
+// range limits, no indexing lag — just arithmetic on numbers already in hand.
+//
+// Tradeoff: needs ~24h of snapshot history to give a TRUE 24h window. Before
+// that (e.g. right after this ships, or right after a ShieldVault redeploy
+// resets the counters to 0), it reports the delta since the OLDEST available
+// snapshot instead, with snapshotCoverage telling the UI how much history
+// that actually represents — so the displayed number is always honest about
+// what window it covers, never silently wrong.
+const STATS_SNAPSHOT_KEY = (vaultAddr) => `privarc_stats_snapshots_${vaultAddr.toLowerCase()}`;
+const SNAPSHOT_MIN_INTERVAL_MS = 5 * 60 * 1000;  // don't snapshot more than once per 5 min
+const SNAPSHOT_MAX_AGE_MS      = 48 * 60 * 60 * 1000; // prune anything older than 48h
+
+function takeStatsSnapshot(vaultAddr, current) {
+  try {
+    const key = STATS_SNAPSHOT_KEY(vaultAddr);
+    const list = JSON.parse(localStorage.getItem(key) || "[]");
+    const now = Date.now();
+    const last = list[list.length - 1];
+    if (last && now - last.ts < SNAPSHOT_MIN_INTERVAL_MS) return list; // throttled
+    const pruned = list.filter(s => now - s.ts < SNAPSHOT_MAX_AGE_MS);
+    pruned.push({ ts: now, ...current });
+    localStorage.setItem(key, JSON.stringify(pruned));
+    return pruned;
+  } catch { return []; }
+}
+
+function get24hDelta(vaultAddr, current) {
+  try {
+    const key = STATS_SNAPSHOT_KEY(vaultAddr);
+    const list = JSON.parse(localStorage.getItem(key) || "[]");
+    if (list.length === 0) return null;
+    const now = Date.now();
+    const dayAgo = now - 24 * 60 * 60 * 1000;
+    // Closest snapshot AT OR BEFORE 24h ago; if none qualifies yet, fall back
+    // to the oldest snapshot we have (best-effort, coverage reported honestly).
+    let ref = list.find(s => s.ts <= dayAgo);
+    if (!ref) ref = list[0];
+    if (!ref || ref.ts >= now) return null;
+    const d = (a, b) => (a == null || b == null) ? null : Math.max(0, a - b);
+    return {
+      tx24h:         d(current.totalTxCount, ref.totalTxCount),
+      volumeUsdc24h: d(current.volumeUsdc,    ref.volumeUsdc),
+      volumeEurc24h: d(current.volumeEurc,    ref.volumeEurc),
+      volumeBtc24h:  d(current.volumeBtc,     ref.volumeBtc),
+      feesUsdc24h:   d(current.feesUsdc,      ref.feesUsdc),
+      feesEurc24h:   d(current.feesEurc,      ref.feesEurc),
+      feesBtc24h:    d(current.feesBtc,       ref.feesBtc),
+      snapshotCoverage: now - ref.ts,
+    };
+  } catch { return null; }
+}
+
 function useProtocolStats(onArc) {
   const [stats, setStats] = useState({
     shieldedUsdc:null, shieldedEurc:null, shieldedBtc:null, leafCount:null,
@@ -1512,6 +1576,11 @@ function useProtocolStats(onArc) {
     version:null, totalTxCount:null,
     volumeUsdc:null, volumeEurc:null, volumeBtc:null,
     feesUsdc:null, feesEurc:null, feesBtc:null,
+    // 24h deltas — computed from local snapshots of the state counters above,
+    // NOT from eth_getLogs (see takeStatsSnapshot/get24hDelta below for why).
+    tx24h:null, volumeUsdc24h:null, volumeEurc24h:null, volumeBtc24h:null,
+    feesUsdc24h:null, feesEurc24h:null, feesBtc24h:null,
+    snapshotCoverage: null, // ms of history actually available (< 24h until the window fills up)
   });
   useEffect(() => {
     if (!onArc) return;
@@ -1566,30 +1635,53 @@ function useProtocolStats(onArc) {
       const failed = results.filter(r => r.status === "rejected");
       if (failed.length) console.warn(`stats fetch: ${failed.length}/${results.length} calls failed`, failed[0].reason);
 
-      setStats(prev => ({
-        shieldedUsdc:    su   != null ? decodeUint256(su)   : prev.shieldedUsdc,
-        shieldedEurc:    se   != null ? decodeUint256(se)   : prev.shieldedEurc,
-        shieldedBtc:     sb   != null ? decodeUint256(sb)   : prev.shieldedBtc,
-        leafCount:       leaf != null ? decodeUint256(leaf) : prev.leafCount,
-        // pauseState specifically: keep previous value rather than null on failure —
-        // null was being interpreted as "paused" by the UI (null !== 0). A transient
-        // RPC hiccup should never visually flip the vault into "paused".
-        pauseState:      pause != null ? decodeUint8(pause) : prev.pauseState,
-        depositsAllowed: depsOk != null ? decodeUint8(depsOk) !== 0 : prev.depositsAllowed,
-        tokenSupport: {
-          [CONTRACTS.USDC]:   tUsdc != null && tUsdc !== "0x" ? BigInt(tUsdc) === 1n : prev.tokenSupport[CONTRACTS.USDC],
-          [CONTRACTS.EURC]:   tEurc != null && tEurc !== "0x" ? BigInt(tEurc) === 1n : prev.tokenSupport[CONTRACTS.EURC],
-          [CONTRACTS.cirBTC]: tBtc  != null && tBtc  !== "0x" ? BigInt(tBtc)  === 1n : prev.tokenSupport[CONTRACTS.cirBTC],
-        },
-        version:      ver != null ? (decodeStringReturn(ver) || prev.version) : prev.version,
-        totalTxCount: txCount != null ? decodeUint256(txCount) : prev.totalTxCount,
-        volumeUsdc: volU != null ? decodeUint256(volU) : prev.volumeUsdc,
-        volumeEurc: volE != null ? decodeUint256(volE) : prev.volumeEurc,
-        volumeBtc:  volB != null ? decodeUint256(volB) : prev.volumeBtc,
-        feesUsdc:   feeU != null ? decodeUint256(feeU) : prev.feesUsdc,
-        feesEurc:   feeE != null ? decodeUint256(feeE) : prev.feesEurc,
-        feesBtc:    feeB != null ? decodeUint256(feeB) : prev.feesBtc,
-      }));
+      setStats(prev => {
+        const next = {
+          shieldedUsdc:    su   != null ? decodeUint256(su)   : prev.shieldedUsdc,
+          shieldedEurc:    se   != null ? decodeUint256(se)   : prev.shieldedEurc,
+          shieldedBtc:     sb   != null ? decodeUint256(sb)   : prev.shieldedBtc,
+          leafCount:       leaf != null ? decodeUint256(leaf) : prev.leafCount,
+          // pauseState specifically: keep previous value rather than null on failure —
+          // null was being interpreted as "paused" by the UI (null !== 0). A transient
+          // RPC hiccup should never visually flip the vault into "paused".
+          pauseState:      pause != null ? decodeUint8(pause) : prev.pauseState,
+          depositsAllowed: depsOk != null ? decodeUint8(depsOk) !== 0 : prev.depositsAllowed,
+          tokenSupport: {
+            [CONTRACTS.USDC]:   tUsdc != null && tUsdc !== "0x" ? BigInt(tUsdc) === 1n : prev.tokenSupport[CONTRACTS.USDC],
+            [CONTRACTS.EURC]:   tEurc != null && tEurc !== "0x" ? BigInt(tEurc) === 1n : prev.tokenSupport[CONTRACTS.EURC],
+            [CONTRACTS.cirBTC]: tBtc  != null && tBtc  !== "0x" ? BigInt(tBtc)  === 1n : prev.tokenSupport[CONTRACTS.cirBTC],
+          },
+          version:      ver != null ? (decodeStringReturn(ver) || prev.version) : prev.version,
+          totalTxCount: txCount != null ? decodeUint256(txCount) : prev.totalTxCount,
+          volumeUsdc: volU != null ? decodeUint256(volU) : prev.volumeUsdc,
+          volumeEurc: volE != null ? decodeUint256(volE) : prev.volumeEurc,
+          volumeBtc:  volB != null ? decodeUint256(volB) : prev.volumeBtc,
+          feesUsdc:   feeU != null ? decodeUint256(feeU) : prev.feesUsdc,
+          feesEurc:   feeE != null ? decodeUint256(feeE) : prev.feesEurc,
+          feesBtc:    feeB != null ? decodeUint256(feeB) : prev.feesBtc,
+        };
+
+        // Record + compute 24h deltas from local snapshots (see takeStatsSnapshot/
+        // get24hDelta above) — only once we actually have fresh totalTxCount data,
+        // since that's the anchor metric everything else deltas against.
+        if (next.totalTxCount != null && CONTRACTS.ShieldVault) {
+          const numeric = {
+            totalTxCount: Number(next.totalTxCount),
+            volumeUsdc: Number(next.volumeUsdc || 0n), volumeEurc: Number(next.volumeEurc || 0n), volumeBtc: Number(next.volumeBtc || 0n),
+            feesUsdc:   Number(next.feesUsdc   || 0n), feesEurc:   Number(next.feesEurc   || 0n), feesBtc:   Number(next.feesBtc   || 0n),
+          };
+          takeStatsSnapshot(CONTRACTS.ShieldVault, numeric);
+          const delta = get24hDelta(CONTRACTS.ShieldVault, numeric);
+          if (delta) {
+            next.tx24h = delta.tx24h;
+            next.volumeUsdc24h = delta.volumeUsdc24h; next.volumeEurc24h = delta.volumeEurc24h; next.volumeBtc24h = delta.volumeBtc24h;
+            next.feesUsdc24h   = delta.feesUsdc24h;   next.feesEurc24h   = delta.feesEurc24h;   next.feesBtc24h   = delta.feesBtc24h;
+            next.snapshotCoverage = delta.snapshotCoverage;
+          }
+        }
+
+        return next;
+      });
       } catch (e) {
         // Catches synchronous throws too (missing imports, undefined refs, etc.) —
         // not just promise rejections. Previous values are kept as-is (setStats
@@ -3055,7 +3147,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
   );
 }
 
-function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
+function AnalyticsPanel({ protocolStats, txHistory, account, onArc, prices }) {
   const ps = protocolStats || {};
 
   // Safe numeric helpers
@@ -3201,6 +3293,20 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
   }, [onArc]);
   const feeRateLabel = feeConfig.bps == null ? "loading…" : feeConfig.bps === 0 ? "Free (launch phase)" : `${(feeConfig.bps/100).toFixed(2)}%`;
 
+  // ── Staking tx count (v1.2+) — combined with ShieldVault.totalTxCount below
+  //     for a true protocol-wide "Total Tx" figure, not just vault actions ──
+  const [stakingTxCount, setStakingTxCount] = useState(null);
+  useEffect(() => {
+    if (!onArc || !CONTRACTS.Staking) return;
+    const run = () => rpcCall("eth_call", [{ to: CONTRACTS.Staking, data: SEL.totalTxCount }, "latest"])
+      .then(res => setStakingTxCount(res && res !== "0x" ? Number(BigInt(res)) : 0))
+      .catch(() => {}); // older Staking (pre-v1.2) doesn't have this — silently keep null, not an error
+    run();
+    const id = setInterval(run, 30000);
+    return () => clearInterval(id);
+  }, [onArc]);
+
+
   // ── Sparkline builder — fully NaN-safe ──────────────────────────────────
   const mkSpk = (rawData, col, label, fmt = v => String(v), realValue = null) => {
     try {
@@ -3301,17 +3407,31 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
         {mkSpk(tvlHistory, "#00FFB0", "SHIELDED TVL (USDC)", v => "$"+(isFinite(Number(v))?Number(v).toFixed(2):"0"), tvlUsdc)}
         <div style={{ background:"rgba(0,0,0,.4)", border:"1px solid rgba(14,165,233,.1)", borderRadius:5, padding:"11px 13px" }}>
           <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:6 }}>LAST 24H ON-CHAIN</div>
-          {[
-            { l:"TX COUNT", v:stats24h.txCount  !=null ? String(stats24h.txCount) : "…", c:"#0EA5E9" },
-            { l:"VOLUME",   v:stats24h.volume   !=null ? "$"+stats24h.volume      : "…", c:"#00FFB0" },
-            { l:"FEES",     v:stats24h.fees     !=null ? "$"+stats24h.fees        : "…", c:"#fbbf24" },
-          ].map(s=>(
+          {(() => {
+            const btcUsd = prices?.WBTC || 0;
+            const blend = (u,e,b) => (u==null && e==null && b==null) ? null : (u||0) + (e||0) + (b||0)*btcUsd;
+            const vol24  = blend(ps.volumeUsdc24h, ps.volumeEurc24h, ps.volumeBtc24h);
+            const fees24 = blend(ps.feesUsdc24h,   ps.feesEurc24h,   ps.feesBtc24h);
+            // Honest about partial coverage: until 24h of local snapshot history has
+            // accumulated (fresh deploy, or first time this ships), the delta covers
+            // whatever window IS available, not a true 24h — labeled accordingly
+            // instead of silently presenting a partial window as "24h".
+            const covMs = ps.snapshotCoverage;
+            const fullDay = covMs != null && covMs >= 23.5 * 3600 * 1000;
+            const covLabel = covMs == null ? "" : fullDay ? "" :
+              covMs < 3600000 ? ` (last ${Math.round(covMs/60000)}m)` : ` (last ${(covMs/3600000).toFixed(1)}h)`;
+            return [
+              { l:"TX COUNT"+covLabel, v: ps.tx24h != null ? String(ps.tx24h) : (isConnected?"loading…":"—"), c:"#0EA5E9" },
+              { l:"VOLUME"+covLabel,   v: vol24  != null ? "$"+vol24.toLocaleString(undefined,{maximumFractionDigits:2})  : (isConnected?"loading…":"—"), c:"#00FFB0" },
+              { l:"FEES"+covLabel,     v: fees24 != null ? "$"+fees24.toLocaleString(undefined,{maximumFractionDigits:4}) : (isConnected?"loading…":"—"), c:"#fbbf24" },
+            ];
+          })().map(s=>(
             <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
               <span style={{ fontSize:8, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
               <span style={{ fontSize:10, color:s.c, fontFamily:"monospace", fontWeight:700 }}>{s.v}</span>
             </div>
           ))}
-          <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:4 }}>Updates every 30s · eth_getLogs</div>
+          <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:4 }}>Delta vs. local snapshot history · updates every 10s</div>
         </div>
       </div>
 
@@ -3321,21 +3441,37 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc }) {
           <div style={{ fontSize:8, color:"#fbbf24", letterSpacing:".14em", fontFamily:"monospace" }}>⚡ PROTOCOL FEES — ALL TIME</div>
           <div style={{ fontSize:7, color:"#64748b", fontFamily:"monospace" }}>{feeRateLabel} · live</div>
         </div>
-        {[
-          { l:"Total Tx (deposits)",  v: stats24h.allTimeTxCount!=null ? String(stats24h.allTimeTxCount) : "loading…", c:"#0EA5E9" },
-          { l:"Fees (USDC)",          v: stats24h.feesUsdc!=null ? "$"+stats24h.feesUsdc.toFixed(4) : "loading…",   c:"#00FFB0" },
-          { l:"Fees (EURC)",          v: stats24h.feesEurc!=null ? "€"+stats24h.feesEurc.toFixed(4) : "loading…",   c:"#60a5fa" },
-          { l:"Total Collected",      v: stats24h.allTimeFees!=null ? "$"+safeFmt(stats24h.allTimeFees,4) : "loading…", c:"#fbbf24" },
-          { l:"Fee Rate (deposit/withdraw)", v: feeRateLabel,                                                       c:"#64748b" },
-          { l:"Treasury",             v: feeConfig.treasury ? feeConfig.treasury.slice(0,6)+"…"+feeConfig.treasury.slice(-4) : "loading…", c:"#64748b" },
-        ].map(s=>(
+        {(() => {
+          const btcUsd = prices?.WBTC || 0;
+          const totalCollected = (ps.feesUsdc!=null || ps.feesEurc!=null || ps.feesBtc!=null)
+            ? Number(ps.feesUsdc||0n)/1e6 + Number(ps.feesEurc||0n)/1e6 + Number(ps.feesBtc||0n)/1e8*btcUsd
+            : null;
+          const combinedTx = ps.totalTxCount != null
+            ? Number(ps.totalTxCount) + (stakingTxCount || 0)
+            : null;
+          return [
+            { l:"Total Tx (vault + staking)",  v: combinedTx!=null ? String(combinedTx) : "loading…", c:"#0EA5E9" },
+            { l:"Fees (USDC)",          v: stats24h.feesUsdc!=null ? "$"+stats24h.feesUsdc.toFixed(4) : "loading…",   c:"#00FFB0" },
+            { l:"Fees (EURC)",          v: stats24h.feesEurc!=null ? "€"+stats24h.feesEurc.toFixed(4) : "loading…",   c:"#60a5fa" },
+            // Matches ShieldPanel's "FEES COLLECTED" tile exactly — same USD-blended
+            // total across USDC + EURC + cirBTC (was USDC+EURC only here before).
+            { l:"Total Collected (all tokens)", v: totalCollected!=null ? "$"+totalCollected.toLocaleString(undefined,{maximumFractionDigits:4}) : "loading…", c:"#fbbf24" },
+            { l:"Fee Rate (deposit/withdraw)", v: feeRateLabel,                                                       c:"#64748b" },
+            { l:"Treasury",             v: feeConfig.treasury ? feeConfig.treasury.slice(0,6)+"…"+feeConfig.treasury.slice(-4) : "loading…", c:"#64748b" },
+          ];
+        })().map(s=>(
           <div key={s.l} style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
             <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{s.l}</span>
             <span style={{ fontSize:9, color:s.c, fontFamily:"monospace", fontWeight:600 }}>{s.v}</span>
           </div>
         ))}
         <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:6, lineHeight:1.5 }}>
-          Read live from ShieldVault.feesCollectedByToken(). Claimable by deployer or treasury via withdrawFees(). Updates every 30s.
+          Total Tx = ShieldVault.totalTxCount() (deposit/withdraw/confidential-send/
+          swap/bridge) + Staking.totalTxCount() (stake/unstake/claimRewards), read
+          live from both contracts. Public (non-shielded) sends aren't counted — they
+          never touch a PrivARC contract, so they're indistinguishable on-chain from
+          any other wallet transfer. Fees read live from ShieldVault.feesCollectedByToken().
+          Claimable by deployer or treasury via withdrawFees(). Updates every 30s.
         </div>
       </div>
 
