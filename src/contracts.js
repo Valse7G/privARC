@@ -11,7 +11,7 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xbD21a78252D055B353a35a9369d20D78a4788a9F",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xA60A36a97A1FbFcd49814a08696EB37671f2d0e1",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
   Staking:             import.meta.env.VITE_STAKING               ?? "0x28f6c47F9cF91ffE8Df0a67C252D711852c9188F",
@@ -182,7 +182,7 @@ export const SEL = {
   protocolFeeBps:       "0x35659fb8",  // protocolFeeBps() — deposit/withdraw
   swapFeeBps:           "0x2ffdaf89",  // swapFeeBps()
   bridgeFeeBps:         "0x4f6aa42b",  // bridgeFeeBps()
-  sendFlatFee:          "0xdc1f80fe",  // sendFlatFee() — 6-dec USDC units
+  flatFeeUsdc:          "0xb892df0e",  // flatFeeUsdc() — 6-dec USDC units (renamed from sendFlatFee in v2.8 — now used by deposit/withdraw/swap/bridge for EURC/cirBTC too, not just send)
   treasury:             "0x61d027b3",  // treasury()
 
   // Protocol fees (Staking v1.1.0)
@@ -296,7 +296,7 @@ const PROOF_C_Y = "0000000000000000000000000000000000000000000000000000000000000
 //   [0x180] length of publicInputs = 1
 //   [0x1a0] publicInputs[0] = commitment (as uint256)
 
-export function buildDepositCalldata(commitment, tokenAddress, amount) {
+export function buildDepositCalldata(commitment, tokenAddress, amount, flatFeeUsdc = 0n) {
   const comm32  = commitment.replace("0x", "").padStart(64, "0");
   const amt32   = encodeUint256(amount);
   const tok32   = encodeAddress(tokenAddress);
@@ -329,11 +329,14 @@ export function buildDepositCalldata(commitment, tokenAddress, amount) {
     + pubLen            // publicInputs.length = 1
     + pubVal;           // publicInputs[0]
 
-  // Native USDC: msg.value = amount (6-dec) * 1e12 → native wei (18-dec)
+  // Native USDC: msg.value = amount (6-dec) * 1e12 → native wei (18-dec) — covers the
+  // deposit itself; the % protocol fee is skimmed from this same amount on-chain.
+  // EURC/cirBTC (v2.8): msg.value instead carries the FLAT protocol fee in USDC —
+  // see ShieldVault.sol's v2.8 changelog for why fees are always USDC-denominated.
   const isNativeUsdc = tokenAddress.toLowerCase() === NATIVE_USDC.toLowerCase();
   const value = isNativeUsdc
     ? "0x" + (BigInt(amount) * NATIVE_TO_ERC20).toString(16)
-    : "0x0";
+    : "0x" + (BigInt(flatFeeUsdc) * NATIVE_TO_ERC20).toString(16);
 
   return { data, value };
 }
@@ -358,7 +361,7 @@ export function buildDepositCalldata(commitment, tokenAddress, amount) {
 // Offset field for publicInputs is at position 15×32 = 0x1e0
 // Dynamic data starts AFTER offset field = at 16×32 = 0x200
 
-export function buildWithdrawCalldata({ nullifier, root, token, recipient, amount, relayerFee = 0n, relayer = "0x0000000000000000000000000000000000000000" }) {
+export function buildWithdrawCalldata({ nullifier, root, token, recipient, amount, relayerFee = 0n, relayer = "0x0000000000000000000000000000000000000000", flatFeeUsdc = 0n }) {
   const dynOff   = encodeUint256(0x200n);  // ← was 0x1e0 (pointed to offset field itself → revert)
   const outerOff = encodeUint256(0x20n);
 
@@ -392,7 +395,13 @@ export function buildWithdrawCalldata({ nullifier, root, token, recipient, amoun
     + encodeUint256(BigInt(pubInputs.length))
     + pubInputs.join("");
 
-  return { data, value: "0x0" };
+  // Native USDC withdraw: no msg.value — % fee is skimmed from withdrawAmt on-chain.
+  // EURC/cirBTC withdraw (v2.8): msg.value carries the FLAT protocol fee in USDC,
+  // paid alongside the withdrawal request — see ShieldVault.sol's v2.8 changelog.
+  const isNativeUsdc = token.toLowerCase() === NATIVE_USDC.toLowerCase();
+  const value = isNativeUsdc ? "0x0" : "0x" + (BigInt(flatFeeUsdc) * NATIVE_TO_ERC20).toString(16);
+
+  return { data, value };
 }
 
 // ─── SHIELDED SEND ────────────────────────────────────────────────────────────
@@ -545,7 +554,7 @@ export function buildShieldedSendWithNoteCalldata({ nullifierIn, merkleRoot, com
 // Total head = 19 words = 0x260
 // Tail: routeData at 0x260, publicInputs follows
 
-export function buildPrivateSwapCalldata({ nullifier, merkleRoot, commitmentOut, tokenIn, tokenOut, amountIn, minAmountOut, deadline, dexRouter = "0x0000000000000000000000000000000000000000", routeData = "0x" }) {
+export function buildPrivateSwapCalldata({ nullifier, merkleRoot, commitmentOut, tokenIn, tokenOut, amountIn, minAmountOut, deadline, dexRouter = "0x0000000000000000000000000000000000000000", routeData = "0x", flatFeeUsdc = 0n }) {
   const outerOff = encodeUint256(0x20n);
 
   // routeData as bytes: length-prefixed, padded to 32-byte boundary
@@ -586,7 +595,14 @@ export function buildPrivateSwapCalldata({ nullifier, merkleRoot, commitmentOut,
     // tail: publicInputs
     + encodeUint256(0n);   // empty publicInputs array (MockVerifierZK ignores them)
 
-  return { data, value: "0x0" };
+  // Swap landing in native USDC: no msg.value — % fee skimmed from grossOut on-chain.
+  // Swap landing in EURC/cirBTC (v2.8): msg.value carries the FLAT protocol fee in
+  // USDC; grossOut is credited in full — see ShieldVault.sol's v2.8 changelog.
+  // Fee depends on tokenOUT (what the user receives), not tokenIn.
+  const tokenOutIsNativeUsdc = tokenOut.toLowerCase() === NATIVE_USDC.toLowerCase();
+  const value = tokenOutIsNativeUsdc ? "0x0" : "0x" + (BigInt(flatFeeUsdc) * NATIVE_TO_ERC20).toString(16);
+
+  return { data, value };
 }
 
 // ─── PRIVATE BRIDGE ───────────────────────────────────────────────────────────
@@ -608,7 +624,7 @@ export function buildPrivateSwapCalldata({ nullifier, merkleRoot, commitmentOut,
 // Head = all words: 15 static inlined + 1 offset = 16 * 32 = 0x200
 // publicInputs tail starts at 0x200
 
-export function buildPrivateBridgeCalldata({ nullifier, merkleRoot, destinationDomain, token, amount, mintRecipient, maxBridgeFee = 0n }) {
+export function buildPrivateBridgeCalldata({ nullifier, merkleRoot, destinationDomain, token, amount, mintRecipient, maxBridgeFee = 0n, flatFeeUsdc = 0n }) {
   const outerOff = encodeUint256(0x20n);
   const offPubIn = encodeUint256(0x200n);  // 16 words * 32 = 0x200
 
@@ -631,7 +647,14 @@ export function buildPrivateBridgeCalldata({ nullifier, merkleRoot, destinationD
     // tail: publicInputs (empty)
     + encodeUint256(0n);
 
-  return { data, value: "0x0" };
+  // Bridging native USDC: no msg.value — % fee skimmed from the bridged amount
+  // on-chain. Bridging EURC/cirBTC (v2.8 — today's actual use case, bridge currently
+  // only routes EURC): msg.value carries the FLAT protocol fee in USDC; the full
+  // amount is bridged via CCTP — see ShieldVault.sol's v2.8 changelog.
+  const isNativeUsdc = token.toLowerCase() === NATIVE_USDC.toLowerCase();
+  const value = isNativeUsdc ? "0x0" : "0x" + (BigInt(flatFeeUsdc) * NATIVE_TO_ERC20).toString(16);
+
+  return { data, value };
 }
 
 // ─── ERC-20 APPROVE ──────────────────────────────────────────────────────────
@@ -673,8 +696,19 @@ export function randomBytes32() {
 export const MIN_DEPOSIT_FEE = 30_000n; // 0.03 USDC (6-dec) — matches the on-chain constant
 
 // fee = max(amount * bps / 10000, MIN_DEPOSIT_FEE), only if it doesn't consume the whole amount
-export function previewDepositFee(amountUnits, protocolFeeBps) {
+// ── v2.8: fees are ALWAYS denominated/collected in USDC, never in EURC/cirBTC ──
+// Native USDC operations keep the % skim (already naturally USDC-denominated).
+// EURC/cirBTC operations instead pay flatFeeUsdc as a SEPARATE USDC payment via
+// msg.value — the token amount itself is never skimmed. Every preview function
+// below now takes isNativeUsdc to branch identically to the on-chain logic.
+
+// Deposit: % skim (USDC, floored at MIN_DEPOSIT_FEE) or flat USDC side-payment (EURC/cirBTC)
+export function previewDepositFee(amountUnits, protocolFeeBps, isNativeUsdc, flatFeeUsdc) {
   const amount = BigInt(amountUnits);
+  if (!isNativeUsdc) {
+    // No skim from the deposited token at all — fee is a separate USDC payment
+    return { fee: 0n, net: amount, flatFeeUsdc: BigInt(flatFeeUsdc || 0) };
+  }
   const bps = BigInt(protocolFeeBps || 0);
   let fee = 0n;
   if (bps > 0n) {
@@ -682,35 +716,46 @@ export function previewDepositFee(amountUnits, protocolFeeBps) {
     fee = bpsFee > MIN_DEPOSIT_FEE ? bpsFee : MIN_DEPOSIT_FEE;
     if (fee >= amount) fee = 0n;
   }
-  return { fee, net: amount - fee };
+  return { fee, net: amount - fee, flatFeeUsdc: 0n };
 }
 
-// fee = withdrawAmt * bps / 10000 (no floor)
-export function previewWithdrawFee(amountUnits, protocolFeeBps) {
+// Withdraw: % skim from withdrawAmt (USDC) or flat USDC side-payment (EURC/cirBTC)
+export function previewWithdrawFee(amountUnits, protocolFeeBps, isNativeUsdc, flatFeeUsdc) {
   const amount = BigInt(amountUnits);
+  if (!isNativeUsdc) {
+    return { fee: 0n, net: amount, flatFeeUsdc: BigInt(flatFeeUsdc || 0) };
+  }
   const fee = (amount * BigInt(protocolFeeBps || 0)) / 10_000n;
-  return { fee, net: amount - fee };
+  return { fee, net: amount - fee, flatFeeUsdc: 0n };
 }
 
-// fee = grossOut * bps / 10000 — PrivARC's own cut, separate from the underlying DEX's LP fee
-export function previewSwapFee(grossOutUnits, swapFeeBps) {
+// Swap: % skim from grossOut if landing in USDC, else flat USDC side-payment (full grossOut credited)
+export function previewSwapFee(grossOutUnits, swapFeeBps, tokenOutIsNativeUsdc, flatFeeUsdc) {
   const gross = BigInt(grossOutUnits);
+  if (!tokenOutIsNativeUsdc) {
+    return { fee: 0n, net: gross, flatFeeUsdc: BigInt(flatFeeUsdc || 0) };
+  }
   const fee = (gross * BigInt(swapFeeBps || 0)) / 10_000n;
-  return { fee, net: gross - fee };
+  return { fee, net: gross - fee, flatFeeUsdc: 0n };
 }
 
-// fee = amount * bps / 10000 — only (amount - fee) is actually bridged via CCTP
-export function previewBridgeFee(amountUnits, bridgeFeeBps) {
+// Bridge: % skim from amount if bridging USDC, else flat USDC side-payment (full amount bridged)
+export function previewBridgeFee(amountUnits, bridgeFeeBps, isNativeUsdc, flatFeeUsdc) {
   const amount = BigInt(amountUnits);
+  if (!isNativeUsdc) {
+    return { fee: 0n, net: amount, flatFeeUsdc: BigInt(flatFeeUsdc || 0) };
+  }
   const fee = (amount * BigInt(bridgeFeeBps || 0)) / 10_000n;
-  return { fee, net: amount - fee };
+  return { fee, net: amount - fee, flatFeeUsdc: 0n };
 }
 
 // Confidential send: flat fee only (no %), paid as native-USDC msg.value alongside
 // shieldedSend/shieldedSendWithNote — see ShieldVault.sol v2.4 changelog for why a
 // percentage fee isn't possible here without revealing the shielded amount.
-export function sendFeeValueHex(sendFlatFeeUnits) {
-  const wei = BigInt(sendFlatFeeUnits || 0) * 1_000_000_000_000n; // 6-dec → 18-dec wei
+// Also reused as the generic "encode a flat USDC amount as native wei" helper for
+// deposit/withdraw/swap/bridge's EURC/cirBTC side-payment (v2.8).
+export function sendFeeValueHex(flatFeeUnits) {
+  const wei = BigInt(flatFeeUnits || 0) * 1_000_000_000_000n; // 6-dec → 18-dec wei
   return "0x" + wei.toString(16);
 }
 

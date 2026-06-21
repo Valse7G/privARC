@@ -1579,7 +1579,7 @@ function useProtocolStats(onArc) {
     // Live fee rates (v2.7+) — exposed here so any panel already consuming
     // protocolStats gets them for free, instead of each panel re-fetching
     // separately (see AnalyticsPanel's older standalone feeConfig fetch).
-    protocolFeeBps:null, swapFeeBps:null, bridgeFeeBps:null, sendFlatFee:null,
+    protocolFeeBps:null, swapFeeBps:null, bridgeFeeBps:null, flatFeeUsdc:null,
     // 24h deltas — computed from local snapshots of the state counters above,
     // NOT from eth_getLogs (see takeStatsSnapshot/get24hDelta below for why).
     tx24h:null, volumeUsdc24h:null, volumeEurc24h:null, volumeBtc24h:null,
@@ -1626,7 +1626,7 @@ function useProtocolStats(onArc) {
           () => call(CONTRACTS.ShieldVault, SEL.protocolFeeBps),
           () => call(CONTRACTS.ShieldVault, SEL.swapFeeBps),
           () => call(CONTRACTS.ShieldVault, SEL.bridgeFeeBps),
-          () => call(CONTRACTS.ShieldVault, SEL.sendFlatFee),
+          () => call(CONTRACTS.ShieldVault, SEL.flatFeeUsdc),
         ];
         // Each entry wrapped individually too: a synchronous throw from any ONE
         // builder function (e.g. an undefined import) now only nulls that ONE call
@@ -1638,7 +1638,7 @@ function useProtocolStats(onArc) {
       const [
         su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
         ver, txCount, volU, volE, volB, feeU, feeE, feeB,
-        protoFeeBpsRes, swapFeeBpsRes, bridgeFeeBpsRes, sendFlatFeeRes,
+        protoFeeBpsRes, swapFeeBpsRes, bridgeFeeBpsRes, flatFeeUsdcRes,
       ] = results.map((_, i) => v(i));
 
       const failed = results.filter(r => r.status === "rejected");
@@ -1672,7 +1672,7 @@ function useProtocolStats(onArc) {
           protocolFeeBps: protoFeeBpsRes   != null ? Number(decodeUint256(protoFeeBpsRes))   : prev.protocolFeeBps,
           swapFeeBps:     swapFeeBpsRes    != null ? Number(decodeUint256(swapFeeBpsRes))    : prev.swapFeeBps,
           bridgeFeeBps:   bridgeFeeBpsRes  != null ? Number(decodeUint256(bridgeFeeBpsRes))  : prev.bridgeFeeBps,
-          sendFlatFee:    sendFlatFeeRes   != null ? decodeUint256(sendFlatFeeRes)            : prev.sendFlatFee,
+          flatFeeUsdc:    flatFeeUsdcRes   != null ? decodeUint256(flatFeeUsdcRes)            : prev.flatFeeUsdc,
         };
 
         // Record + compute 24h deltas from local snapshots (see takeStatsSnapshot/
@@ -2343,23 +2343,29 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
     // With MockVerifierZK, any bytes32 is accepted — random is fine for testnet
     const commitment = randomBytes32();
 
-    // Step 3: Build deposit calldata
-    // For native USDC: value = amount * 1e12 (wei), no ERC-20 transferFrom
-    // For EURC/cirBTC: value = 0x0, standard ERC-20 transferFrom
-    const { data: depositData, value: depositValue } = buildDepositCalldata(commitment, token.address, amountBig);
-
-    // ── Protocol fee preview (ShieldVault v2.4 — protocolFeeBps, floored at MIN_DEPOSIT_FEE) ──
-    // IMPORTANT: the contract credits totalShieldedByToken with NET-of-fee, so the locally
-    // saved note must record the SAME net amount — otherwise a later withdraw/send/swap
-    // would request more than the pool actually backs for this note. See ShieldVault.sol
-    // v2.4 changelog ("Update accounting — net of fee") for the full rationale.
-    let depositFee = 0n, netAmount = amountBig;
+    // ── Protocol fee preview (v2.8 — ALWAYS denominated/collected in USDC) ──────
+    // Native USDC: % fee (protocolFeeBps, floored at MIN_DEPOSIT_FEE), skimmed from
+    // amount — note saved locally must use the NET amount, matching what ShieldVault
+    // actually credits to totalShieldedByToken. EURC/cirBTC: flat flatFeeUsdc paid as
+    // a SEPARATE USDC side-payment via msg.value — the deposited amount itself is
+    // credited in FULL (no skim), so netAmount == amountBig for those tokens.
+    const isNativeUsdc = token.isNative;
+    let depositFee = 0n, netAmount = amountBig, flatFeeUsdc = 0n;
     try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
-      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-      const preview = previewDepositFee(amountBig, bps);
+      const [bpsRes, flatRes] = await Promise.all([
+        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]),
+        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc },   "latest"]),
+      ]);
+      const bps = bpsRes && bpsRes !== "0x" ? BigInt(bpsRes) : 0n;
+      flatFeeUsdc = flatRes && flatRes !== "0x" ? BigInt(flatRes) : 0n;
+      const preview = previewDepositFee(amountBig, bps, isNativeUsdc, flatFeeUsdc);
       depositFee = preview.fee; netAmount = preview.net;
     } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
+    // Step 3: Build deposit calldata
+    // For native USDC: value = amount * 1e12 (wei), no ERC-20 transferFrom
+    // For EURC/cirBTC: value = flatFeeUsdc * 1e12 (the separate USDC fee payment, v2.8), standard ERC-20 transferFrom
+    const { data: depositData, value: depositValue } = buildDepositCalldata(commitment, token.address, amountBig, flatFeeUsdc);
 
     // Show confirmation modal before hitting wallet — shows real amount (wallet shows value=0 for ERC-20)
     const confirmed = await askConfirm({
@@ -2368,8 +2374,9 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
       token:  token.symbol,
       note:   (token.isNative
         ? "Native USDC — wallet will show the USDC value correctly. 1 transaction."
-        : `Token deposit — your wallet shows value: 0 for token transactions. 2 steps: approve then deposit.`)
-        + (depositFee > 0n ? ` Protocol fee: ${formatToken(depositFee, token.decimals)} ${token.symbol} — you'll receive ${formatToken(netAmount, token.decimals)} ${token.symbol} shielded.` : ""),
+        : `Token deposit — your wallet shows value: 0 for the ${token.symbol} transfer itself (the protocol fee is paid separately, in USDC). 2 steps: approve then deposit.`)
+        + (isNativeUsdc && depositFee > 0n ? ` Protocol fee: ${formatToken(depositFee, token.decimals)} ${token.symbol} — you'll receive ${formatToken(netAmount, token.decimals)} ${token.symbol} shielded.` : "")
+        + (!isNativeUsdc && flatFeeUsdc > 0n ? ` Protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC (paid separately — your full ${amount} ${token.symbol} is shielded, untouched).` : ""),
     });
     if (!confirmed) { setLoading(false); return; }
 
@@ -2487,19 +2494,28 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
         </div>
         <OsField label={`${token.symbol} AMOUNT`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon={token.logo} suffix={token.symbol}/>
         {(() => {
-          const bps = ps?.protocolFeeBps;
-          const rateLabel = bps == null ? "loading…" : bps === 0 ? "0.00%" : `${(bps/100).toFixed(2)}%`;
-          let feeAmountLabel = rateLabel;
-          if (bps != null && amount && !isNaN(parseFloat(amount))) {
-            const amountUnits = BigInt(Math.round(parseFloat(amount) * 1e6));
-            const { fee } = previewDepositFee(amountUnits, bps);
-            feeAmountLabel = fee > 0n ? `${formatToken(fee, token.decimals)} ${token.symbol}` : "Free";
+          if (token.isNative) {
+            // Native USDC: % fee, naturally USDC-denominated
+            const bps = ps?.protocolFeeBps;
+            const rateLabel = bps == null ? "loading…" : bps === 0 ? "0.00%" : `${(bps/100).toFixed(2)}%`;
+            let feeAmountLabel = rateLabel;
+            if (bps != null && amount && !isNaN(parseFloat(amount))) {
+              const amountUnits = BigInt(Math.round(parseFloat(amount) * 1e6));
+              const { fee } = previewDepositFee(amountUnits, bps, true, 0n);
+              feeAmountLabel = fee > 0n ? `${formatToken(fee, token.decimals)} ${token.symbol}` : "Free";
+            }
+            return <IG items={[["Protocol Fee", feeAmountLabel, bps==null ? "loading…" : `${rateLabel} rate`], ["Gas","USDC","Arc Testnet"], ["Privacy","ZK proof","On-chain"]]}/>;
           }
-          return <IG items={[["Protocol Fee", feeAmountLabel, bps==null ? "loading…" : `${rateLabel} rate`], ["Gas","USDC","Arc Testnet"], ["Privacy","ZK proof","On-chain"]]}/>;
+          // EURC/cirBTC (v2.8): flat fee, paid SEPARATELY in USDC — never a % of the
+          // deposited token, since there's no on-chain price feed to convert one to
+          // the other. The deposited amount itself is always credited in full.
+          const flat = ps?.flatFeeUsdc;
+          const feeLabel = flat == null ? "loading…" : flat === 0n ? "Free" : `${formatToken(flat, 6)} USDC`;
+          return <IG items={[["Protocol Fee", feeLabel, "paid in USDC, separate"], ["Gas","USDC","Arc Testnet"], ["Privacy","ZK proof","On-chain"]]}/>;
         })()}
       </div>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:3, padding:"8px 11px", marginBottom:8, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5 }}>
-        ℹ {token.isNative ? "1 transaction: Deposit (native USDC via msg.value)." : `2 transactions: Approve ${token.symbol} → Deposit.`} Gas paid in USDC on Arc Testnet.
+        ℹ {token.isNative ? "1 transaction: Deposit (native USDC via msg.value)." : `2 transactions: Approve ${token.symbol} → Deposit (protocol fee paid separately in USDC via msg.value).`} Gas paid in USDC on Arc Testnet.
         <br/>Need tokens? <a href={ARC_TESTNET.faucet} target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>faucet.circle.com ↗</a>
         {" · "}<a href={`${ARC_TESTNET.explorer}/address/${CONTRACTS.ShieldVault}`} target="_blank" rel="noreferrer" style={{ color:"#00FFB0" }}>ShieldVault ↗</a>
       </div>
@@ -2599,11 +2615,27 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
     const minAmountOut   = amountBig * 995n / 1000n;
     const deadline       = BigInt(Math.floor(Date.now() / 1000) + 600);
 
-    // Testnet note: no real DEX on Arc — PrivateSwap routes internally.
-    // Route: Arc StableFX (live) or Uniswap (pending)
-    // dexRouter = address(0) for testnet — PrivateSwap accepts this with MockVerifierZK
+    // ── Protocol fee preview (v2.8 — ALWAYS denominated/collected in USDC) ──────
+    // Swap landing in USDC: % fee (swapFeeBps), skimmed from the DEX output — estimate
+    // only, actual fee is computed on-chain from the real output. Swap landing in
+    // EURC/cirBTC: flat flatFeeUsdc paid as a SEPARATE USDC side-payment via msg.value;
+    // the full DEX output is credited, never skimmed (no on-chain price feed exists to
+    // convert a % of EURC/cirBTC into a USDC fee).
+    const tokenOutIsNativeUsdc = tokenOutAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
+    let swapFeeEst = 0n, flatFeeUsdc = 0n;
+    try {
+      const [bpsRes, flatRes] = await Promise.all([
+        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps },  "latest"]),
+        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]),
+      ]);
+      const bps = bpsRes && bpsRes !== "0x" ? BigInt(bpsRes) : 0n;
+      flatFeeUsdc = flatRes && flatRes !== "0x" ? BigInt(flatRes) : 0n;
+      const outBig = BigInt(Math.round(parseFloat(q.out) * 1e6));
+      swapFeeEst = previewSwapFee(outBig, bps, tokenOutIsNativeUsdc, flatFeeUsdc).fee;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
     const routerAddr = route === "uniswap" ? UNISWAP_ROUTER : ARC_STABLEFX;
-    const { data } = buildPrivateSwapCalldata({
+    const { data, value } = buildPrivateSwapCalldata({
       nullifier,
       merkleRoot,
       commitmentOut,
@@ -2614,25 +2646,19 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
       deadline,
       dexRouter:    routerAddr,
       routeData:    "0x",
+      flatFeeUsdc,
     });
-
-    // ── Protocol fee preview (ShieldVault v2.4 — swapFeeBps, skimmed from DEX output) ──
-    // Estimate only: actual fee is computed on-chain from the real DEX output, which can
-    // differ slightly from this quote-based estimate.
-    let swapFeeEst = 0n;
-    try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps }, "latest"]);
-      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-      const outBig = BigInt(Math.round(parseFloat(q.out) * 1e6));
-      swapFeeEst = previewSwapFee(outBig, bps).fee;
-    } catch { /* fee read failed — assume 0, matches default deploy state */ }
 
     const ok = await sendRealTx({
       label: `Swap ${fr}→${to}`,
-      description: swapFeeEst > 0n
-        ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (est. protocol fee: ~${formatToken(swapFeeEst, 6)} ${to})`
-        : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`,
-      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
+      description: tokenOutIsNativeUsdc
+        ? (swapFeeEst > 0n
+            ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (est. protocol fee: ~${formatToken(swapFeeEst, 6)} ${to})`
+            : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`)
+        : (flatFeeUsdc > 0n
+            ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC, paid separately)`
+            : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`),
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
     if (ok) {
@@ -2776,13 +2802,13 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       }
     }
 
-    // ── Flat protocol fee (ShieldVault v2.4 — sendFlatFee, native USDC msg.value) ──
+    // ── Flat protocol fee (ShieldVault v2.4+ — flatFeeUsdc, native USDC msg.value) ──
     // Read before showing the confirm modal so the fee is disclosed up front.
     // Defaults to 0 until governance opts in via setSendFlatFee — matches pre-v2.4
     // behavior exactly when unset.
     let sendFee = 0n;
     try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.sendFlatFee }, "latest"]);
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
       sendFee = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
     } catch { /* fee read failed — assume 0, matches default deploy state */ }
 
@@ -2951,12 +2977,12 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       relayer: "0x0000000000000000000000000000000000000000",
     });
 
-    // ── Protocol fee preview (ShieldVault v2.4 — protocolFeeBps, skimmed from what's received) ──
+    // ── Protocol fee preview (v2.8 — % skim, already USDC-denominated since this panel is USDC-only) ──
     let withdrawFee = 0n;
     try {
       const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
       const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-      withdrawFee = previewWithdrawFee(amountBig, bps).fee;
+      withdrawFee = previewWithdrawFee(amountBig, bps, true, 0n).fee;
     } catch { /* fee read failed — assume 0, matches default deploy state */ }
 
     const ok = await sendRealTx({
@@ -3077,7 +3103,18 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 
     const nullifier = randomBytes32();
 
-    const { data } = buildPrivateBridgeCalldata({
+    // ── Protocol fee preview (v2.8 — ALWAYS denominated/collected in USDC) ──────
+    // This panel always bridges EURC, never native USDC, so the flat flatFeeUsdc
+    // path always applies — paid as a SEPARATE USDC side-payment via msg.value.
+    // The full EURC amount is bridged via CCTP, never skimmed (no on-chain price
+    // feed exists to convert a % of EURC into a USDC-denominated fee).
+    let flatFeeUsdc = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
+      flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+
+    const { data, value } = buildPrivateBridgeCalldata({
       nullifier,
       merkleRoot: root,
       destinationDomain: ch.domainId,
@@ -3085,22 +3122,15 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       amount: amountBig,
       mintRecipient,
       maxBridgeFee: 0n,
+      flatFeeUsdc,
     });
-
-    // ── Protocol fee preview (ShieldVault v2.4 — bridgeFeeBps, retained in vault before CCTP) ──
-    let bridgeFee = 0n;
-    try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.bridgeFeeBps }, "latest"]);
-      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-      bridgeFee = previewBridgeFee(amountBig, bps).fee;
-    } catch { /* fee read failed — assume 0, matches default deploy state */ }
 
     const ok = await sendRealTx({
       label: `Bridge → ${ch.name}`,
-      description: bridgeFee > 0n
-        ? `${amount} EURC → ${ch.name} via CCTP v2 (protocol fee: ${formatToken(bridgeFee, 6)} EURC, ${formatToken(amountBig - bridgeFee, 6)} EURC bridged)`
+      description: flatFeeUsdc > 0n
+        ? `${amount} EURC → ${ch.name} via CCTP v2 (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC, paid separately — full ${amount} EURC bridged)`
         : `${amount} EURC → ${ch.name} via CCTP v2 (private)`,
-      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
     if (ok) {
@@ -3471,20 +3501,15 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc, prices }) {
           <div style={{ fontSize:7, color:"#64748b", fontFamily:"monospace" }}>{feeRateLabel} · live</div>
         </div>
         {(() => {
-          const btcUsd = prices?.WBTC || 0;
-          const totalCollected = (ps.feesUsdc!=null || ps.feesEurc!=null || ps.feesBtc!=null)
-            ? Number(ps.feesUsdc||0n)/1e6 + Number(ps.feesEurc||0n)/1e6 + Number(ps.feesBtc||0n)/1e8*btcUsd
-            : null;
           const combinedTx = ps.totalTxCount != null
             ? Number(ps.totalTxCount) + (stakingTxCount || 0)
             : null;
           return [
             { l:"Total Tx (vault + staking)",  v: combinedTx!=null ? String(combinedTx) : "loading…", c:"#0EA5E9" },
-            { l:"Fees (USDC)",          v: stats24h.feesUsdc!=null ? "$"+stats24h.feesUsdc.toFixed(4) : "loading…",   c:"#00FFB0" },
-            { l:"Fees (EURC)",          v: stats24h.feesEurc!=null ? "€"+stats24h.feesEurc.toFixed(4) : "loading…",   c:"#60a5fa" },
-            // Matches ShieldPanel's "FEES COLLECTED" tile exactly — same USD-blended
-            // total across USDC + EURC + cirBTC (was USDC+EURC only here before).
-            { l:"Total Collected (all tokens)", v: totalCollected!=null ? "$"+totalCollected.toLocaleString(undefined,{maximumFractionDigits:4}) : "loading…", c:"#fbbf24" },
+            // v2.8: every fee, from every action, on every token, lands in USDC only
+            // (see ShieldVault.sol v2.8 changelog) — Fees (EURC) / Fees (cirBTC) tiles
+            // removed since they're now permanently $0/€0 by design, not a bug.
+            { l:"Fees Collected (USDC)", v: stats24h.feesUsdc!=null ? "$"+stats24h.feesUsdc.toFixed(4) : "loading…", c:"#fbbf24" },
             { l:"Fee Rate (deposit/withdraw)", v: feeRateLabel,                                                       c:"#64748b" },
             { l:"Treasury",             v: feeConfig.treasury ? feeConfig.treasury.slice(0,6)+"…"+feeConfig.treasury.slice(-4) : "loading…", c:"#64748b" },
           ];
