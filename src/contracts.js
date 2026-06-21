@@ -11,7 +11,7 @@ export const ARC_CHAIN_ID = 5042002;
 
 // ── Contract addresses ────────────────────────────────────────────────────────
 const _c = {
-  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xc4e5307e9b719cB8fFC29F8aae96D2CC56960Cbd",
+  ShieldVault:         import.meta.env.VITE_SHIELD_VAULT         ?? "0xbD21a78252D055B353a35a9369d20D78a4788a9F",
   Timelock:            import.meta.env.VITE_TIMELOCK              ?? "0x8DF7C02012EBec968bdEc100F4fEAF772AcAab99",
   Governance:          import.meta.env.VITE_GOVERNANCE            ?? "0x89F08E2BBc963e48986D8A0FfA23858bA643C78A",
   Staking:             import.meta.env.VITE_STAKING               ?? "0x28f6c47F9cF91ffE8Df0a67C252D711852c9188F",

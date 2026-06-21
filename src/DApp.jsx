@@ -1576,6 +1576,10 @@ function useProtocolStats(onArc) {
     version:null, totalTxCount:null,
     volumeUsdc:null, volumeEurc:null, volumeBtc:null,
     feesUsdc:null, feesEurc:null, feesBtc:null,
+    // Live fee rates (v2.7+) — exposed here so any panel already consuming
+    // protocolStats gets them for free, instead of each panel re-fetching
+    // separately (see AnalyticsPanel's older standalone feeConfig fetch).
+    protocolFeeBps:null, swapFeeBps:null, bridgeFeeBps:null, sendFlatFee:null,
     // 24h deltas — computed from local snapshots of the state counters above,
     // NOT from eth_getLogs (see takeStatsSnapshot/get24hDelta below for why).
     tx24h:null, volumeUsdc24h:null, volumeEurc24h:null, volumeBtc24h:null,
@@ -1619,6 +1623,10 @@ function useProtocolStats(onArc) {
           () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.USDC)),
           () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.EURC)),
           () => call(CONTRACTS.ShieldVault, SEL.feesCollectedByToken + encodeAddress(CONTRACTS.cirBTC)),
+          () => call(CONTRACTS.ShieldVault, SEL.protocolFeeBps),
+          () => call(CONTRACTS.ShieldVault, SEL.swapFeeBps),
+          () => call(CONTRACTS.ShieldVault, SEL.bridgeFeeBps),
+          () => call(CONTRACTS.ShieldVault, SEL.sendFlatFee),
         ];
         // Each entry wrapped individually too: a synchronous throw from any ONE
         // builder function (e.g. an undefined import) now only nulls that ONE call
@@ -1630,6 +1638,7 @@ function useProtocolStats(onArc) {
       const [
         su, se, sb, leaf, pause, depsOk, tUsdc, tEurc, tBtc,
         ver, txCount, volU, volE, volB, feeU, feeE, feeB,
+        protoFeeBpsRes, swapFeeBpsRes, bridgeFeeBpsRes, sendFlatFeeRes,
       ] = results.map((_, i) => v(i));
 
       const failed = results.filter(r => r.status === "rejected");
@@ -1659,6 +1668,11 @@ function useProtocolStats(onArc) {
           feesUsdc:   feeU != null ? decodeUint256(feeU) : prev.feesUsdc,
           feesEurc:   feeE != null ? decodeUint256(feeE) : prev.feesEurc,
           feesBtc:    feeB != null ? decodeUint256(feeB) : prev.feesBtc,
+          // Fee rates — plain uint256 (bps for the first three, 6-dec flat USDC for the last)
+          protocolFeeBps: protoFeeBpsRes   != null ? Number(decodeUint256(protoFeeBpsRes))   : prev.protocolFeeBps,
+          swapFeeBps:     swapFeeBpsRes    != null ? Number(decodeUint256(swapFeeBpsRes))    : prev.swapFeeBps,
+          bridgeFeeBps:   bridgeFeeBpsRes  != null ? Number(decodeUint256(bridgeFeeBpsRes))  : prev.bridgeFeeBps,
+          sendFlatFee:    sendFlatFeeRes   != null ? decodeUint256(sendFlatFeeRes)            : prev.sendFlatFee,
         };
 
         // Record + compute 24h deltas from local snapshots (see takeStatsSnapshot/
@@ -2472,7 +2486,17 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
           AMOUNT — min {token.minDisplay}
         </div>
         <OsField label={`${token.symbol} AMOUNT`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon={token.logo} suffix={token.symbol}/>
-        <IG items={[["Protocol Fee","0.00","Launch phase"],["Gas","USDC","Arc Testnet"],["Privacy","ZK proof","On-chain"]]}/>
+        {(() => {
+          const bps = ps?.protocolFeeBps;
+          const rateLabel = bps == null ? "loading…" : bps === 0 ? "0.00%" : `${(bps/100).toFixed(2)}%`;
+          let feeAmountLabel = rateLabel;
+          if (bps != null && amount && !isNaN(parseFloat(amount))) {
+            const amountUnits = BigInt(Math.round(parseFloat(amount) * 1e6));
+            const { fee } = previewDepositFee(amountUnits, bps);
+            feeAmountLabel = fee > 0n ? `${formatToken(fee, token.decimals)} ${token.symbol}` : "Free";
+          }
+          return <IG items={[["Protocol Fee", feeAmountLabel, bps==null ? "loading…" : `${rateLabel} rate`], ["Gas","USDC","Arc Testnet"], ["Privacy","ZK proof","On-chain"]]}/>;
+        })()}
       </div>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.12)", borderRadius:3, padding:"8px 11px", marginBottom:8, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.5 }}>
         ℹ {token.isNative ? "1 transaction: Deposit (native USDC via msg.value)." : `2 transactions: Approve ${token.symbol} → Deposit.`} Gas paid in USDC on Arc Testnet.
@@ -3409,7 +3433,12 @@ function AnalyticsPanel({ protocolStats, txHistory, account, onArc, prices }) {
           <div style={{ fontSize:7, color:"#64748b", letterSpacing:".15em", fontFamily:"monospace", marginBottom:6 }}>LAST 24H ON-CHAIN</div>
           {(() => {
             const btcUsd = prices?.WBTC || 0;
-            const blend = (u,e,b) => (u==null && e==null && b==null) ? null : (u||0) + (e||0) + (b||0)*btcUsd;
+            // FIX: u/e are raw on-chain 6-decimal integers (2 USDC = 2_000_000) and b is
+            // raw 8-decimal — this used to sum them directly with no /1e6 or /1e8, so a
+            // genuine $12 of volume displayed as $12,000,000. Same shape as the working
+            // blendedUsd() in ShieldPanel — just wasn't applied here.
+            const blend = (u,e,b) => (u==null && e==null && b==null) ? null
+              : (Number(u||0)/1e6) + (Number(e||0)/1e6) + (Number(b||0)/1e8)*btcUsd;
             const vol24  = blend(ps.volumeUsdc24h, ps.volumeEurc24h, ps.volumeBtc24h);
             const fees24 = blend(ps.feesUsdc24h,   ps.feesEurc24h,   ps.feesBtc24h);
             // Honest about partial coverage: until 24h of local snapshot history has
