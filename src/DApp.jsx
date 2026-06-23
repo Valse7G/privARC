@@ -1963,9 +1963,14 @@ const NOTE_EMITTED_TOPIC = "0x8aa4f1b6dca845fb984ab9e095ea9417a69f44be2922e9b5cc
 // THIS note is cross-device recoverable, never local availability).
 async function relaySelfNote({ account, sendRealTx, commitment, amount, token, label, description }) {
   try {
+    // vault tag (v2.9): this commitment only exists in THIS ShieldVault's Merkle
+    // tree. Without it, a note relayed before a redeploy would still decrypt fine
+    // after the redeploy and get silently re-added as if spendable on the NEW
+    // (unrelated) contract — re-introducing the exact "phantom balance" bug fixed
+    // by vault-scoping notesKey. scanStealthNotes checks this field on decrypt.
     const selfNoteJson = JSON.stringify({
       commitment, amount: amount.toString(), token,
-      from: account?.address, ts: Date.now(),
+      from: account?.address, ts: Date.now(), vault: CONTRACTS.ShieldVault,
     });
     const ecies = await eciesEncryptNoteForRecipient(account?.address, selfNoteJson);
     if (!ecies) return false; // no view key registered yet — nothing to relay
@@ -2019,6 +2024,17 @@ async function scanStealthNotes(address, recompute) {
         const note = await eciesDecryptNoteWithViewKey(address, encHex, ephHex);
         if (!note || !note.commitment) continue;
         if (existingSet.has(note.commitment)) continue;
+        // FIX (v2.9): a note's commitment only exists in the Merkle tree of the
+        // ShieldVault it was created against. Without this check, a confidential
+        // send or self-backup made before the latest ShieldVault redeploy would
+        // still decrypt successfully and get silently treated as spendable balance
+        // on the NEW (unrelated) contract — re-introducing the "phantom balance"
+        // bug that vault-scoping notesKey already fixes for deposit/withdraw/swap/
+        // bridge notes. Notes without a `vault` tag (sent before this fix shipped)
+        // are accepted leniently rather than hidden outright — the vault-scoped
+        // notesKey is the primary defense; this only closes the narrower stealth-
+        // note path where ViewKeyRegistry events aren't vault-filtered upstream.
+        if (note.vault && note.vault.toLowerCase() !== CONTRACTS.ShieldVault.toLowerCase()) continue;
 
         existing.push({ ...note, ts: ts*1000 || Date.now(), source:"stealth" });
         existingSet.add(note.commitment);
@@ -2033,10 +2049,24 @@ async function scanStealthNotes(address, recompute) {
   } catch(e) { console.warn("[PrivARC stealth scan]", e.message); }
 }
 
-// ── SHIELDED NOTES — wallet-scoped, on-chain reconciled ────────────────────
-
-// Key scoped per wallet address — prevents cross-account data leakage
-const notesKey  = (addr) => addr ? `privarc_notes_${addr.toLowerCase()}` : "privarc_notes_anon";
+// ── SHIELDED NOTES — wallet-scoped AND ShieldVault-scoped, on-chain reconciled ─
+//
+// FIX (critical): notes used to be keyed ONLY by wallet address. After a
+// ShieldVault redeploy (new address, fresh empty Merkle tree), the frontend kept
+// reading the SAME localStorage bucket and displaying the SAME balance — even
+// though those notes' commitments don't exist anywhere in the new contract's
+// tree at all. The displayed "shielded balance" was showing money the user
+// could never actually spend (any withdraw/send/swap against those commitments
+// would simply revert on-chain). The underlying tokens are still safe — they
+// never moved, they're just sitting in the OLD, now-abandoned ShieldVault
+// contract — but the active UI had no way to reach them anymore.
+//
+// Now the storage key includes CONTRACTS.ShieldVault, so a redeploy
+// automatically and correctly resets the displayed balance to 0 (a fresh,
+// empty bucket for the new address) without deleting the old data — it's
+// still sitting under the OLD key if ever needed for manual recovery via the
+// old contract address directly.
+const notesKey  = (addr) => addr ? `privarc_notes_${addr.toLowerCase()}_${CONTRACTS.ShieldVault.toLowerCase()}` : "privarc_notes_anon";
 const getNotes  = (addr) => { try { return JSON.parse(localStorage.getItem(notesKey(addr)) || "[]"); } catch { return []; } };
 const saveNotes = (addr, notes) => { try { localStorage.setItem(notesKey(addr), JSON.stringify(notes)); } catch {} };
 
@@ -2166,7 +2196,11 @@ function useShieldedBalances(prices, address) {
 // ── ShieldedWallet mini-panel ─────────────────────────────────────────────────
 // Shown at top of Send / Swap / Withdraw / Bridge panels.
 // Displays per-token shielded balance + MAX buttons.
-function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
+function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = false }) {
+  // actionableFilter: tokens the user can actually act on in this panel.
+  // Both old tokenFilter and new actionableFilter control clickability;
+  // ALL 3 tokens are always displayed for visual uniformity across panels.
+  const activeFilter = actionableFilter || tokenFilter;
   if (!bals) return null;
   const usdc  = bals.usdc  ?? 0;
   const eurc  = bals.eurc  ?? 0;
@@ -2174,30 +2208,25 @@ function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
   const rawUsdc = bals.rawUsdc  ?? 0n;
   const rawEurc = bals.rawEurc  ?? 0n;
   const rawCbtc = bals.rawCbtc  ?? 0n;
-  const noteCount = bals.noteCount ?? 0;
 
   const allTokens = [
-    { sym: "USDC",   val: usdc,  raw: rawUsdc,  dec: 6, fmt: v => "$" + v.toFixed(2),   color: "#00FFB0", usdVal: usdc },
-    { sym: "EURC",   val: eurc,  raw: rawEurc,  dec: 6, fmt: v => "€" + v.toFixed(2),   color: "#60a5fa", usdVal: eurc * 1.08 },
-    { sym: "cirBTC", val: cbtc,  raw: rawCbtc,  dec: 8, fmt: v => "₿" + v.toFixed(5),   color: "#F7931A", usdVal: cbtc * 0 },
+    { sym:"USDC",   val:usdc, raw:rawUsdc, dec:6, fmt:v=>"$"+v.toFixed(2),  color:"#00FFB0", usdVal:usdc },
+    { sym:"EURC",   val:eurc, raw:rawEurc, dec:6, fmt:v=>"€"+v.toFixed(2),  color:"#60a5fa", usdVal:eurc * 1.08 },
+    { sym:"cirBTC", val:cbtc, raw:rawCbtc, dec:8, fmt:v=>"₿"+v.toFixed(5),  color:"#F7931A", usdVal:0 },
   ];
-  const tokens = allTokens.filter(t => !tokenFilter || tokenFilter.includes(t.sym));
-  // Total only reflects the filtered tokens (e.g. BridgePanel filters to EURC only)
-  const totalUsd = tokens.reduce((sum, t) => sum + (isFinite(t.usdVal) ? t.usdVal : 0), 0);
+
+  // USD total: only from actionable tokens (what this panel can spend)
+  const actionable = allTokens.filter(t => !activeFilter || activeFilter.includes(t.sym));
+  const totalUsd = actionable.reduce((sum, t) => sum + (isFinite(t.usdVal) ? t.usdVal : 0), 0);
 
   if (compact) {
-    // Single-line version: just show available token + MAX
-    const t = tokens[0];
+    const t = actionable[0];
     if (!t) return null;
     return (
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
-        <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>
-          Shielded {t.sym}
-        </span>
-        <button
-          onClick={() => onMax?.(t.sym, t.val, t.raw, t.dec)}
-          style={{ fontSize:9, color: t.val > 0 ? t.color : "#334155", background:"none", border:"none", cursor: t.val > 0 ? "pointer" : "default", fontFamily:"monospace", fontWeight:700 }}
-        >
+        <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>Shielded {t.sym}</span>
+        <button onClick={() => onMax?.(t.sym, t.val, t.raw, t.dec)}
+          style={{ fontSize:9, color: t.val > 0 ? t.color : "#334155", background:"none", border:"none", cursor: t.val > 0 ? "pointer" : "default", fontFamily:"monospace", fontWeight:700 }}>
           MAX {t.fmt(t.val)}
         </button>
       </div>
@@ -2213,24 +2242,31 @@ function ShieldedWallet({ bals, onMax, tokenFilter, compact = false }) {
         </span>
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:5 }}>
-        {tokens.map(t => (
-          <button
-            key={t.sym}
-            onClick={() => t.val > 0 && onMax?.(t.sym, t.val, t.raw, t.dec)}
-            style={{
-              background: t.val > 0 ? `rgba(${t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26"},.06)` : "rgba(0,0,0,.2)",
-              border: `1px solid ${t.val > 0 ? t.color + "30" : "rgba(255,255,255,.04)"}`,
-              borderRadius:4, padding:"7px 5px", cursor: t.val > 0 ? "pointer" : "default",
-              textAlign:"center", transition:"all .15s",
-            }}
-          >
-            <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:3 }}>{t.sym}</div>
-            <div style={{ fontSize:11, color: t.val > 0 ? t.color : "#334155", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.val)}</div>
-            {t.val > 0 && <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>}
-          </button>
-        ))}
+        {allTokens.map(t => {
+          const isActionable = !activeFilter || activeFilter.includes(t.sym);
+          const isClickable  = isActionable && t.val > 0;
+          const rgb = t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26";
+          return (
+            <button key={t.sym}
+              onClick={() => isClickable && onMax?.(t.sym, t.val, t.raw, t.dec)}
+              title={!isActionable ? `${t.sym} is not actionable in this panel` : ""}
+              style={{
+                background: isClickable ? `rgba(${rgb},.06)` : "rgba(0,0,0,.2)",
+                border: `1px solid ${isClickable ? t.color+"30" : "rgba(255,255,255,.04)"}`,
+                borderRadius:4, padding:"7px 5px",
+                cursor: isClickable ? "pointer" : "default",
+                textAlign:"center", transition:"all .15s",
+                opacity: !isActionable ? 0.38 : 1,
+              }}>
+              <div style={{ fontSize:8, color: isActionable ? "#64748b" : "#334155", fontFamily:"monospace", marginBottom:3 }}>{t.sym}</div>
+              <div style={{ fontSize:11, color: isClickable ? t.color : "#334155", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.val)}</div>
+              {isClickable  && <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>}
+              {!isActionable && <div style={{ fontSize:6, color:"#1e293b", fontFamily:"monospace", marginTop:2 }}>not used here</div>}
+            </button>
+          );
+        })}
       </div>
-      {noteCount === 0 && (
+      {bals.noteCount === 0 && (
         <div style={{ fontSize:8, color:"#F59E0B", fontFamily:"monospace", marginTop:7 }}>
           ⚠ No shielded notes — use Shield panel first
         </div>
@@ -2464,7 +2500,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
           { l:"TVL USDC",    v:tvlUsdc,  c:"#00FFB0" },
           { l:"TVL EURC",    v:tvlEurc,  c:"#4ade80" },
           { l:"TVL cirBTC",  v:tvlBtc,   c:"#F7931A" },
-          { l:"COMMITMENTS", v:leafCnt,  c:"#a78bfa" },
+          { l:"COMMITMENTS (tree, all-time)", v:leafCnt,  c:"#a78bfa" },
           { l:"VAULT",       v: vaultState==="active" ? "🟢 ACTIVE" : vaultState==="paused" ? "🔴 PAUSED" : "⚪ —",
                               c: vaultState==="active" ? "#4ade80"   : vaultState==="paused" ? "#f87171"   : "#64748b" },
           { l:"VERSION",     v:ps?.version ? "v"+ps.version : "—", c:"#64748b" },
@@ -2477,6 +2513,13 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
             <div style={{ fontSize:11, fontWeight:700, color:s.c, fontFamily:"monospace" }}>{s.v}</div>
           </div>
         ))}
+      </div>
+      <div style={{ fontSize:7, color:"#1e3a2a", fontFamily:"monospace", marginTop:-6, marginBottom:10, lineHeight:1.5 }}>
+        Commitments comes from MerkleTreeManager — shared, persistent infrastructure
+        that survives ShieldVault redeploys by design (preserves the privacy set across
+        versions), so it does NOT reset like the other stats above. PROTOCOL TXS / VOLUME
+        / FEES / VERSION read directly from the currently active ShieldVault contract and
+        DO reset to 0 on every redeploy.
       </div>
       {/* Token selector + amount */}
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:12 }}>
@@ -2712,7 +2755,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
         </div>
       </div>
 
-      <ShieldedWallet bals={bals} tokenFilter={["USDC","EURC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }}/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }}/>
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:10 }}>
         <div style={{ display:"flex", gap:8, alignItems:"flex-end", marginBottom:10 }}><div style={{ flex:1 }}><OsField label="FROM" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⬆"/></div><TS v={fr} onChange={v=>{setFr(v);if(v===to)setTo(TK.find(t=>t!==v));}}/></div>
         <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}><button onClick={()=>{setFr(to);setTo(fr);setAmount("");setQ(null);}} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.25)", borderRadius:"50%", width:30, height:30, cursor:"pointer", color:"#00FFB0", fontSize:15, display:"flex", alignItems:"center", justifyContent:"center" }}>⇅</button></div>
@@ -2790,6 +2833,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
           token:      note.token,
           from:       account?.address,
           ts:         Date.now(),
+          vault:      CONTRACTS.ShieldVault, // see relaySelfNote's v2.9 comment for why
         });
         const ecies = await eciesEncryptNoteForRecipient(dest, noteJson);
         if (ecies) {
@@ -2905,7 +2949,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       </div>
       {mode==="shielded"
         ? <>
-            <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, raw, dec) => setAmount(val.toFixed(dec === 8 ? 5 : 2))}/>
             <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
               🛡 Confidential send — shielded balance is transferred with governed visibility. Sender and recipient addresses are not linked on-chain.
             </div>
@@ -3017,7 +3061,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
     <div style={{ animation:"fi .3s ease" }}>
       <PH icon="↙" title="WITHDRAW" sub="Unshield — exit confidential balance to public address"/>
       <NotOnArcWarning/>
-      <ShieldedWallet bals={bals} tokenFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Unshield — exit the confidential balance to a public address. Governed visibility: only you and parties you authorize can link deposit and withdrawal.
       </div>
@@ -3042,6 +3086,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]=useState(0); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
+  const [recipient, setRecipient]=useState("");
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
   const ch = CH.find(c=>c.domainId===destId) || CH[0];
@@ -3097,8 +3142,12 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       setLoading(false); return;
     }
 
-    // mintRecipient = recipient address on destination chain (private in ZK proof)
-    const recipientAddr = account?.address || "0x0000000000000000000000000000000000000000";
+    // mintRecipient = 32-byte ABI-padded address on the destination chain
+    // Uses the explicitly entered recipient address, or falls back to the sender's
+    // own address (same-wallet bridge) if the field is left blank.
+    const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
+      ? recipient.trim()
+      : account?.address || "0x0000000000000000000000000000000000000000";
     const mintRecipient = "0x" + "000000000000000000000000" + recipientAddr.replace("0x", "").toLowerCase();
 
     const nullifier = randomBytes32();
@@ -3155,7 +3204,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.${remaining>0n ? (backedUp ? " Change note backed up on-chain." : "") : ""}`, "success");
     }
 
-    setAmount(""); setLoading(false);
+    setAmount(""); setRecipient(""); setLoading(false);
   };
 
   return (
@@ -3171,7 +3220,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         {" · "}
         <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit ↗</a>
       </div>
-      <ShieldedWallet bals={bals} tokenFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+      <ShieldedWallet bals={bals} actionableFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Confidential cross-chain transfer. Recipient address has governed visibility — only authorized parties can access it.
       </div>
@@ -3185,7 +3234,38 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         </div>
       </div>
       <OsField label="AMOUNT (EURC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⟺" suffix="EURC"/>
-      <IG items={[["Protocol","Private Bridge","Circle"],["Destination",ch?.name,"selected"],["Recipient","Private","hidden on-chain"],["Time","~1–5 min","bridge confirm"]]}/>
+
+      {/* Recipient — optional, defaults to sender's own address (same-wallet bridge) */}
+      <div style={{ marginBottom:10 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:5 }}>
+          ↗ RECIPIENT ON {ch?.name?.toUpperCase() || "DESTINATION"} (0x... — leave blank to bridge to yourself)
+        </div>
+        <div style={{ background:"rgba(0,0,0,.35)", border:`1px solid ${recipient && !recipient.startsWith("0x") ? "rgba(248,113,113,.4)" : "rgba(0,255,176,.15)"}`, borderRadius:3 }}>
+          <input
+            value={recipient}
+            onChange={e => setRecipient(e.target.value)}
+            placeholder={account?.address ? `${account.address.slice(0,6)}…${account.address.slice(-4)} (your address)` : "0x..."}
+            style={{ width:"100%", background:"transparent", border:"none", outline:"none", padding:"10px 12px", color:"#ffffff", fontSize:9, fontFamily:"monospace" }}
+          />
+        </div>
+        {recipient && (!recipient.startsWith("0x") || recipient.length !== 42) && (
+          <div style={{ fontSize:8, color:"#f87171", fontFamily:"monospace", marginTop:4 }}>
+            ⚠ Enter a valid 0x… EVM address (42 chars), or leave blank to bridge to yourself.
+          </div>
+        )}
+        {!recipient && (
+          <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:3 }}>
+            Recipient is private — not visible on-chain (governed visibility via ZK proof).
+          </div>
+        )}
+      </div>
+
+      {(() => {
+        const recipientDisplay = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
+          ? recipient.trim().slice(0,6)+"…"+recipient.trim().slice(-4)+" (custom)"
+          : "Self (your address)";
+        return <IG items={[["Protocol","Private Bridge","Circle"],["Destination",ch?.name,"selected"],["Recipient",recipientDisplay,"private/ZK"],["Time","~1–5 min","bridge confirm"]]}/>;
+      })()}
       {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
           ⚠ No shielded notes. Use Shield panel first.
