@@ -3246,53 +3246,45 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
 function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
   const CH = Object.values(CCTP_DOMAINS);
-  const [destId, setDestId]=useState(0); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
-  const [recipient, setRecipient]=useState("");
+  const [destId, setDestId]       = useState(0);
+  const [amount, setAmount]       = useState("");
+  const [loading, setLoading]     = useState(false);
+  const [recipient, setRecipient] = useState("");
+  const [token, setToken]         = useState("USDC"); // token selector: USDC | EURC | cirBTC
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
   const ch = CH.find(c=>c.domainId===destId) || CH[0];
 
+  const BRIDGE_TOKENS = {
+    USDC:   { sym:"USDC",   addr:() => NATIVE_USDC,      dec:6, fmt:v=>"$"+v.toFixed(2),  color:"#00FFB0", bal: bals?.usdc  ?? 0 },
+    EURC:   { sym:"EURC",   addr:() => CONTRACTS.EURC,   dec:6, fmt:v=>"\u20ac"+v.toFixed(2),  color:"#60a5fa", bal: bals?.eurc  ?? 0 },
+    cirBTC: { sym:"cirBTC", addr:() => CONTRACTS.cirBTC, dec:8, fmt:v=>"\u20bf"+v.toFixed(5), color:"#F7931A", bal: bals?.cbtc  ?? 0 },
+  };
+  const tk = BRIDGE_TOKENS[token] || BRIDGE_TOKENS.USDC;
+
   const bridge = async () => {
-    // ShieldVault.privateBridgeExec(BridgeParams)
-    // Consumes a shielded note, calls CCTP TokenMessenger.depositForBurn() to bridge USDC.
-    // The recipient address on destination is embedded in the ZK proof as PRIVATE input.
-    // On-chain: amount and destination domain are visible. Recipient is hidden.
-    //
-    // LIMITATION (Arc Testnet): CCTP requires ERC-20 approve() on the burn token.
-    // Arc native USDC (0x3600...) behaves like ETH — approve() reverts.
-    // Bridge only works with EURC (ERC-20) once EURC_ADDRESS is set in deployment.
     if (!amount || Number(amount) <= 0) return;
     setLoading(true);
 
-    // EURC is now deployed on Arc Testnet (0x89B508..., latest.json v2.3.0)
-    // Bridge uses EURC via CCTP depositForBurn (true ERC-20 approve)
-    const EURC = CONTRACTS.EURC;
-    const isEurcDeployed = EURC !== "0x0000000000000000000000000000000000000000";
-
-    if (!isEurcDeployed) {
-      notify(
-        "Bridge",
-        "EURC address not set. CCTP requires an ERC-20 token — Arc native USDC cannot be approved. " +
-        "Set EURC_ADDRESS in your deployment and reshield EURC to use the bridge.",
-        "error"
-      );
+    const tokenAddr = tk.addr();
+    if (!tokenAddr || tokenAddr === "0x0000000000000000000000000000000000000000") {
+      notify("Bridge", `${tk.sym} contract address not configured. Check deployment.`, "error");
       setLoading(false); return;
     }
 
-    const notes = getNotes(account?.address);
-    const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig && n.token.toLowerCase() === EURC.toLowerCase());
+    const notes     = getNotes(account?.address);
+    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
+    const note = notes.find(n =>
+      BigInt(Math.round(Number(n.amount)||0)) >= amountBig &&
+      n.token.toLowerCase() === tokenAddr.toLowerCase()
+    );
     if (!note) {
-      notify("Bridge", "No shielded EURC note found. Shield EURC first.", "error");
+      notify("Bridge", `No shielded ${tk.sym} note found. Shield ${tk.sym} first.`, "error");
       setLoading(false); return;
     }
 
-    // Arc Testnet: CCTP depositForBurn not live yet.
-    // The ZK tx still executes (burns nullifier, records commitment) but cross-chain
-    // delivery requires Circle's attestation service on a live CCTP domain.
-    notify("Bridge", "Cross-chain transfer initiated. Funds will arrive on the destination chain once the bridge confirms the transaction (1–5 min).", "info");
+    notify("Bridge", "Cross-chain transfer initiated. Funds will arrive on the destination chain once the bridge confirms (1-5 min).", "info");
 
-    // CRITICAL: root MUST be in MerkleTreeManager root history
     let root;
     try {
       const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
@@ -3303,66 +3295,49 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       setLoading(false); return;
     }
 
-    // mintRecipient = 32-byte ABI-padded address on the destination chain
-    // Uses the explicitly entered recipient address, or falls back to the sender's
-    // own address (same-wallet bridge) if the field is left blank.
     const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
       ? recipient.trim()
       : account?.address || "0x0000000000000000000000000000000000000000";
     const mintRecipient = "0x" + "000000000000000000000000" + recipientAddr.replace("0x", "").toLowerCase();
-
     const nullifier = randomBytes32();
 
-    // ── Protocol fee preview (v2.8 — ALWAYS denominated/collected in USDC) ──────
-    // This panel always bridges EURC, never native USDC, so the flat flatFeeUsdc
-    // path always applies — paid as a SEPARATE USDC side-payment via msg.value.
-    // The full EURC amount is bridged via CCTP, never skimmed (no on-chain price
-    // feed exists to convert a % of EURC into a USDC-denominated fee).
     let flatFeeUsdc = 0n;
     try {
       const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
       flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+    } catch {}
 
     const { data, value } = buildPrivateBridgeCalldata({
-      nullifier,
-      merkleRoot: root,
-      destinationDomain: ch.domainId,
-      token: EURC,
-      amount: amountBig,
-      mintRecipient,
-      maxBridgeFee: 0n,
-      flatFeeUsdc,
+      nullifier, merkleRoot: root, destinationDomain: ch.domainId,
+      token: tokenAddr, amount: amountBig, mintRecipient, maxBridgeFee: 0n, flatFeeUsdc,
     });
 
+    const feeDesc = flatFeeUsdc > 0n
+      ? ` (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC paid separately)`
+      : "";
+
     const ok = await sendRealTx({
-      label: `Bridge → ${ch.name}`,
-      description: flatFeeUsdc > 0n
-        ? `${amount} EURC → ${ch.name} via CCTP v2 (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC, paid separately — full ${amount} EURC bridged)`
-        : `${amount} EURC → ${ch.name} via CCTP v2 (private)`,
+      label: `Bridge \u2192 ${ch.name}`,
+      description: `${amount} ${tk.sym} \u2192 ${ch.name} via CCTP v2${feeDesc} (private)`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
     if (ok) {
-      const updated = notes.filter(n => n.commitment !== note.commitment);
+      const updated  = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       let backedUp = false;
       if (remaining > 0n) {
         const changeCommitment = randomBytes32();
         updated.push({ ...note, amount: remaining.toString(), commitment: changeCommitment });
-        // ── Item 2B: self-addressed encrypted note for the change note ──────────
-        // (The bridged amount itself leaves Arc entirely — there's no new Arc-side
-        // note for it to back up. Only the leftover "change" from a partial bridge
-        // is a new spendable commitment that needs cross-device recovery.)
         backedUp = await relaySelfNote({
           account, sendRealTx, commitment: changeCommitment, amount: remaining, token: note.token,
-          label: "Bridge · Cross-Device Backup",
+          label: "Bridge \u00b7 Cross-Device Backup",
           description: "Saving an encrypted copy of the change note on-chain.",
         });
       }
       saveNotes(account?.address, updated);
-      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
-      notify("Bridge ✓", `${amount} EURC → ${ch.name} — funds will arrive in 1–5 min.${remaining>0n ? (backedUp ? " Change note backed up on-chain." : "") : ""}`, "success");
+      recomputeShielded?.();
+      notify("Bridge \u2713", `${amount} ${tk.sym} \u2192 ${ch.name} \u2014 funds will arrive in 1-5 min.${remaining>0n?(backedUp?" Change note backed up on-chain.":""):""}`, "success");
     }
 
     setAmount(""); setRecipient(""); setLoading(false);
@@ -3370,21 +3345,46 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⟺" title="BRIDGE" sub="Cross-chain USDC via CCTP v2 — Arc Testnet → other testnets"/>
+      <PH icon="\u27fa" title="BRIDGE" sub="Cross-chain transfer via CCTP v2 \u2014 Arc Testnet \u2192 other testnets"/>
       <NotOnArcWarning/>
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.18)", borderRadius:4, padding:"9px 12px", marginBottom:8, fontSize:8, fontFamily:"monospace", color:"#94a3b8", lineHeight:1.6 }}>
-        <div style={{ color:"#0EA5E9", fontWeight:700, marginBottom:3 }}>⬡ Powered by Circle App Kit + CCTP v2</div>
+        <div style={{ color:"#0EA5E9", fontWeight:700, marginBottom:3 }}>\u2b21 Powered by Circle App Kit + CCTP v2</div>
         Confidential cross-chain transfer via Circle's Cross-Chain Transfer Protocol.
         Only amount + destination chain visible on-chain. Recipient has governed visibility.
         <br/>
-        <a href="https://developers.circle.com/stablecoins/cctp-getting-started" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>CCTP docs ↗</a>
-        {" · "}
-        <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit ↗</a>
+        <a href="https://developers.circle.com/stablecoins/cctp-getting-started" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>CCTP docs \u2197</a>
+        {" \u00b7 "}
+        <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit \u2197</a>
       </div>
-      <ShieldedWallet bals={bals} actionableFilter={["EURC"]} onMax={(_sym, val) => setAmount(val.toFixed(2))}/>
+
+      {/* Token selector */}
+      <div style={{ marginBottom:10 }}>
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>TOKEN</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5 }}>
+          {Object.values(BRIDGE_TOKENS).map(t => {
+            const active = token === t.sym;
+            const rgb = t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26";
+            return (
+              <button key={t.sym} onClick={() => { setToken(t.sym); setAmount(""); }}
+                style={{ background:active?`rgba(${rgb},.10)`:"rgba(0,0,0,.3)", border:`1px solid ${active?t.color+"60":"rgba(255,255,255,.07)"}`, borderRadius:5, padding:"8px 5px", cursor:"pointer", textAlign:"center", transition:"all .2s" }}>
+                <div style={{ fontSize:8, color:active?t.color:"#64748b", fontFamily:"monospace", marginBottom:2 }}>{t.sym}</div>
+                <div style={{ fontSize:11, color:active?t.color:"#475569", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.bal)}</div>
+                {t.bal > 0
+                  ? <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap \u2192 MAX</div>
+                  : <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:2 }}>vide</div>
+                }
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
+
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Confidential cross-chain transfer. Recipient address has governed visibility — only authorized parties can access it.
+        \ud83d\udee1 Transfert cross-chain confidentiel. Destinataire \u00e0 visibilit\u00e9 gouvern\u00e9e.
       </div>
+
       <div style={{ marginBottom:12 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION CHAIN</div>
         <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5, marginBottom:8 }}>
@@ -3394,48 +3394,52 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
           </button>)}
         </div>
       </div>
-      <OsField label="AMOUNT (EURC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⟺" suffix="EURC"/>
 
-      {/* Recipient — optional, defaults to sender's own address (same-wallet bridge) */}
+      <OsField label={`AMOUNT (${tk.sym})`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder={tk.dec===8?"0.00000":"0.00"} icon="\u27fa" suffix={tk.sym}/>
+
       <div style={{ marginBottom:10 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:5 }}>
-          ↗ RECIPIENT ON {ch?.name?.toUpperCase() || "DESTINATION"} (0x... — leave blank to bridge to yourself)
+          \u2197 RECIPIENT ON {ch?.name?.toUpperCase() || "DESTINATION"} (0x... \u2014 leave blank to bridge to yourself)
         </div>
         <div style={{ background:"rgba(0,0,0,.35)", border:`1px solid ${recipient && !recipient.startsWith("0x") ? "rgba(248,113,113,.4)" : "rgba(0,255,176,.15)"}`, borderRadius:3 }}>
-          <input
-            value={recipient}
-            onChange={e => setRecipient(e.target.value)}
-            placeholder={account?.address ? `${account.address.slice(0,6)}…${account.address.slice(-4)} (your address)` : "0x..."}
+          <input value={recipient} onChange={e => setRecipient(e.target.value)}
+            placeholder={account?.address ? `${account.address.slice(0,6)}\u2026${account.address.slice(-4)} (your address)` : "0x..."}
             style={{ width:"100%", background:"transparent", border:"none", outline:"none", padding:"10px 12px", color:"#ffffff", fontSize:9, fontFamily:"monospace" }}
           />
         </div>
         {recipient && (!recipient.startsWith("0x") || recipient.length !== 42) && (
           <div style={{ fontSize:8, color:"#f87171", fontFamily:"monospace", marginTop:4 }}>
-            ⚠ Enter a valid 0x… EVM address (42 chars), or leave blank to bridge to yourself.
+            \u26a0 Enter a valid 0x\u2026 EVM address (42 chars), or leave blank to bridge to yourself.
           </div>
         )}
         {!recipient && (
           <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:3 }}>
-            Recipient is private — not visible on-chain (governed visibility via ZK proof).
+            Recipient is private \u2014 not visible on-chain (governed visibility via ZK proof).
           </div>
         )}
       </div>
 
       {(() => {
         const recipientDisplay = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
-          ? recipient.trim().slice(0,6)+"…"+recipient.trim().slice(-4)+" (custom)"
+          ? recipient.trim().slice(0,6)+"\u2026"+recipient.trim().slice(-4)+" (custom)"
           : "Self (your address)";
-        return <IG items={[["Protocol","Private Bridge","Circle"],["Destination",ch?.name,"selected"],["Recipient",recipientDisplay,"private/ZK"],["Time","~1–5 min","bridge confirm"]]}/>;
+        return <IG items={[["Token",tk.sym,"selected"],["Destination",ch?.name,"selected"],["Recipient",recipientDisplay,"private/ZK"],["Time","~1-5 min","bridge confirm"]]}/>;
       })()}
+
       {(bals?.noteCount ?? 0) === 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
-          ⚠ No shielded notes. Use Shield panel first.
+          \u26a0 No shielded notes. Use Shield panel first.
+        </div>
+      )}
+      {tk.bal <= 0 && (bals?.noteCount ?? 0) > 0 && (
+        <div style={{ background:"rgba(14,165,233,.05)", border:"1px solid rgba(14,165,233,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#0EA5E9", fontFamily:"monospace" }}>
+          \u26a0 Shielded {tk.sym} balance is zero. Select another token or shield {tk.sym} first.
         </div>
       )}
       <ArcBtn
-        label={!onArc?"⚠ SWITCH TO ARC TESTNET":`⟶ BRIDGE TO ${ch?.name?.toUpperCase()}`}
+        label={!onArc?"\u26a0 SWITCH TO ARC TESTNET":`\u27f6 BRIDGE ${tk.sym} \u2192 ${ch?.name?.toUpperCase()}`}
         onClick={onArc?bridge:undefined} loading={loading}
-        disabled={!onArc||!amount||Number(amount)<=0||(bals?.noteCount??0)===0}
+        disabled={!onArc||!amount||Number(amount)<=0||tk.bal<=0}
         color={onArc?"#00FFB0":"#F59E0B"}
       />
     </div>
