@@ -175,6 +175,7 @@ export const SEL = {
   unstake:            "0x2e17de78",  // unstake(uint256)
   claimRewards:       "0x372500ab",  // claimRewards()
   previewRewards:     "0xf166e920",  // previewRewards(address)
+  getUserStakes:      "0x5e0e5b3e",  // getUserStakes(address) → StakePosition[]
 
   // Protocol fees (ShieldVault v2.4.0)
   feesCollectedByToken: "0xa2c169a7",  // feesCollectedByToken(address)

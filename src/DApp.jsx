@@ -1196,7 +1196,9 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     if (status==="success"&&hash) {
       const entry = { hash, label, ts:tc(), status:"success", amount: amount || "—" };
       setTxHistory(p => {
-        const updated = [entry, ...p.slice(0, 49)];
+        // Deduplicate by hash — if chain-rebuild already added this tx, don't double it
+        if (p.some(e => e.hash === hash)) return p;
+        const updated = [entry, ...p.slice(0, 199)];
         if (account?.address) {
           const key = `privarc_txhistory_${account.address.toLowerCase()}`;
           try { localStorage.setItem(key, JSON.stringify(updated)); } catch {}
@@ -1209,7 +1211,7 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
     } else {
       push(message, "info");
     }
-  }, [push]);
+  }, [push, account?.address]);
 
   // Balance displayed as USDC 6-dec equivalent from native 18-dec
   const usdcBalance = balance ? nativeToUsdc6(balance) : null;
@@ -1233,11 +1235,25 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
 
   const protocolStats = useProtocolStats(onArc);
 
-  // Load wallet-scoped tx history when account connects
+  // Load wallet-scoped tx history when account connects — cross-device: rebuild from chain
   useEffect(() => {
     if (!account?.address) { setTxHistory([]); return; }
     const key = `privarc_txhistory_${account.address.toLowerCase()}`;
-    try { setTxHistory(JSON.parse(localStorage.getItem(key) || "[]")); } catch { setTxHistory([]); }
+    // 1. Immediately show cached localStorage entries so UI isn't blank
+    let cached = [];
+    try { cached = JSON.parse(localStorage.getItem(key) || "[]"); } catch {}
+    setTxHistory(cached);
+    // 2. Rebuild from on-chain events (cross-device, cross-browser)
+    buildTxHistoryFromChain(account.address).then(onchain => {
+      if (!onchain || onchain.length === 0) return;
+      // Merge: on-chain entries take priority; cached entries that have no on-chain
+      // counterpart (e.g. very recent, not yet indexed) are appended if not duplicate
+      const seen = new Set(onchain.map(e => e.hash));
+      const localOnly = cached.filter(e => e.hash && !seen.has(e.hash));
+      const merged = [...onchain, ...localOnly].slice(0, 200);
+      setTxHistory(merged);
+      try { localStorage.setItem(key, JSON.stringify(merged)); } catch {}
+    }).catch(() => {});
   }, [account?.address]);
 
   // Migrate legacy notes (from global "privarc_notes" key → wallet-scoped) on first connect
@@ -2077,7 +2093,152 @@ const EV = {
   SwapExecuted:             "0x2f4c76c8d18f45069b0941499205a7fceaaa3caf9e2e6328f6a544cd339120f3",
   BridgeInitiated:          "0xaba39d71efa30c57b34ac80bfd1c5a6ad2a46bb6887c1bdb8d8500410c59b5ab",
   ShieldedTransferProcessed:"0x6a0c61ef664f8d0c17a5bee04becc9ed40374fc0f473a7bf7f3cce66d1bd2b7d",
+  // Staking contract events — keccak256("Staked(address,uint256,uint256,uint256,uint256,uint256)") etc.
+  Staked:           "0x1449c6dd7851abc30abf37f57715f492010519147cc2652fbc38202c18a6ee90",
+  Unstaked:         "0x0f5bb82176feb1b5e747e28471aa92156a04d9f3ab9f45f28e2d704232b93f75",
+  RewardsClaimed:   "0x106f923f993c2149d49b4255ff723acafa1f2d94393f561d3eda32ae348f7241",
 };
+
+// ── Cross-device tx history: rebuild from on-chain events ─────────────────────
+// Called on wallet connect. Fetches ShieldVault + Staking events for this address,
+// merges with localStorage cache, deduplicates by tx hash, returns sorted array.
+async function buildTxHistoryFromChain(address) {
+  if (!address) return [];
+  const MAX_BLOCKS = 5_000_000;
+  try {
+    const blockHex = await rpcCall("eth_blockNumber", []);
+    const cur = parseInt(blockHex, 16);
+    const from = "0x" + Math.max(0, cur - MAX_BLOCKS).toString(16);
+    const addrTopic = "0x" + "000000000000000000000000" + address.slice(2).toLowerCase();
+
+    // Fetch all ShieldVault + Staking events where the user is an indexed topic
+    const [depLogs, wdLogs, swLogs, bridgeLogs, sendLogs, stakeLogs, unstakeLogs, claimLogs] =
+      await Promise.allSettled([
+        rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.ShieldVault, topics:[EV.Deposited,  null, addrTopic] }]),
+        rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.ShieldVault, topics:[EV.Withdrawn,  null, null, addrTopic] }]),
+        rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.ShieldVault, topics:[EV.SwapExecuted] }]),
+        rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.ShieldVault, topics:[EV.BridgeInitiated] }]),
+        rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.ShieldVault, topics:[EV.ShieldedTransferProcessed] }]),
+        CONTRACTS.Staking ? rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.Staking, topics:[EV.Staked, addrTopic] }]) : [],
+        CONTRACTS.Staking ? rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.Staking, topics:[EV.Unstaked, addrTopic] }]) : [],
+        CONTRACTS.Staking ? rpcCall("eth_getLogs", [{ fromBlock:from, toBlock:"latest", address:CONTRACTS.Staking, topics:[EV.RewardsClaimed, addrTopic] }]) : [],
+      ]).then(results => results.map(r => (r.status === "fulfilled" && Array.isArray(r.value)) ? r.value : []));
+
+    const tc = (tsMs) => tsMs ? new Date(tsMs).toLocaleString("fr-FR", { dateStyle:"short", timeStyle:"short" }) : "—";
+
+    const entries = [];
+
+    // Helper to extract uint256 from 32-byte hex chunk
+    const u256 = (hex, offset=0) => { try { return BigInt("0x" + hex.slice(offset*64, offset*64+64)); } catch { return 0n; } };
+
+    for (const log of depLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      const tok = log.topics?.[2] ? "0x"+log.topics[2].slice(26) : "";
+      const sym = tok.toLowerCase()===CONTRACTS.EURC?.toLowerCase() ? "EURC" : tok.toLowerCase()===CONTRACTS.cirBTC?.toLowerCase() ? "cirBTC" : "USDC";
+      entries.push({ hash:log.transactionHash, label:"Shield", ts:tc(Date.now()), status:"success", amount: (Number(amount)/1e6).toFixed(2)+" "+sym, blockHex:log.blockNumber });
+    }
+    for (const log of wdLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      entries.push({ hash:log.transactionHash, label:"Withdraw", ts:tc(Date.now()), status:"success", amount:(Number(amount)/1e6).toFixed(2)+" USDC", blockHex:log.blockNumber });
+    }
+    for (const log of swLogs) {
+      entries.push({ hash:log.transactionHash, label:"Swap", ts:tc(Date.now()), status:"success", amount:"—", blockHex:log.blockNumber });
+    }
+    for (const log of bridgeLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      entries.push({ hash:log.transactionHash, label:"Bridge", ts:tc(Date.now()), status:"success", amount:(Number(amount)/1e6).toFixed(2)+" EURC", blockHex:log.blockNumber });
+    }
+    for (const log of sendLogs) {
+      entries.push({ hash:log.transactionHash, label:"Send", ts:tc(Date.now()), status:"success", amount:"—", blockHex:log.blockNumber });
+    }
+    for (const log of stakeLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      entries.push({ hash:log.transactionHash, label:"Stake", ts:tc(Date.now()), status:"success", amount:(Number(amount)/1e6).toFixed(2)+" USDC", blockHex:log.blockNumber });
+    }
+    for (const log of unstakeLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      entries.push({ hash:log.transactionHash, label:"Unstake", ts:tc(Date.now()), status:"success", amount:(Number(amount)/1e6).toFixed(2)+" USDC", blockHex:log.blockNumber });
+    }
+    for (const log of claimLogs) {
+      const data = (log.data||"0x").replace("0x","");
+      const amount = data.length >= 64 ? u256(data,0) : 0n;
+      entries.push({ hash:log.transactionHash, label:"Claim Rewards", ts:tc(Date.now()), status:"success", amount:(Number(amount)/1e6).toFixed(4)+" USDC", blockHex:log.blockNumber });
+    }
+
+    // Deduplicate by txHash (keep first seen)
+    const seen = new Set();
+    const unique = entries.filter(e => { if (!e.hash || seen.has(e.hash)) return false; seen.add(e.hash); return true; });
+
+    // Sort by blockNumber descending (most recent first)
+    unique.sort((a,b) => {
+      const na = parseInt(a.blockHex||"0x0",16);
+      const nb = parseInt(b.blockHex||"0x0",16);
+      return nb - na;
+    });
+
+    return unique.slice(0, 200); // cap at 200 entries
+  } catch(e) {
+    console.warn("[PrivARC] buildTxHistoryFromChain failed:", e.message);
+    return [];
+  }
+}
+
+// ── Cross-device staking positions: rebuild from Staking contract ──────────────
+// getUserStakes(address) returns StakePosition[] — ABI-decoded here.
+// StakePosition: (uint256 amount, uint256 lockDuration, uint256 lockMultiplier,
+//                 uint256 stakeTime, uint256 unlockTime, uint256 lastClaimTime,
+//                 uint256 apyBps, bool active)  — 8 fields × 32 bytes each
+async function loadStakingPositionsFromChain(address) {
+  if (!address || !CONTRACTS.Staking) return null;
+  try {
+    // getUserStakes(address) — selector 0x5e0e5b3e (computed from exact sig)
+    const sel = "0x5e0e5b3e";
+    const raw = await rpcCall("eth_call", [{ to:CONTRACTS.Staking, data: sel + "000000000000000000000000" + address.slice(2).toLowerCase() }, "latest"]);
+    if (!raw || raw === "0x" || raw.length < 4) return [];
+
+    const hex = raw.replace("0x","");
+    // ABI decode dynamic array: offset(32), length(32), then N×(8×32) structs
+    if (hex.length < 128) return [];
+    const count = parseInt(hex.slice(64,128),16);
+    if (count === 0 || count > 500) return [];
+
+    const positions = [];
+    const FIELD = 64; // each uint256/bool is 32 bytes = 64 hex chars
+    const STRUCT_SIZE = 8 * FIELD; // 8 fields
+    const base = 128; // skip offset + length words
+
+    for (let i = 0; i < count; i++) {
+      const s = base + i * STRUCT_SIZE;
+      if (hex.length < s + STRUCT_SIZE) break;
+      const amount       = BigInt("0x" + hex.slice(s,           s+FIELD));
+      const lockDuration = BigInt("0x" + hex.slice(s+FIELD,     s+FIELD*2));
+      // lockMultiplier at s+FIELD*2 (skip)
+      const stakeTime    = Number(BigInt("0x" + hex.slice(s+FIELD*3, s+FIELD*4)));
+      const unlockTime   = Number(BigInt("0x" + hex.slice(s+FIELD*4, s+FIELD*5)));
+      // lastClaimTime at s+FIELD*5 (skip)
+      const apyBps       = Number(BigInt("0x" + hex.slice(s+FIELD*6, s+FIELD*7)));
+      const active       = hex.slice(s+FIELD*7, s+FIELD*8).endsWith("1");
+      if (!active) continue; // skip already-unstaked positions
+      positions.push({
+        id:         stakeTime * 1000 + i, // deterministic, stable across devices
+        amount:     Number(amount) / 1e6,
+        lockDays:   Math.round(Number(lockDuration) / 86400),
+        unlockedAt: unlockTime * 1000,
+        stakedAt:   stakeTime  * 1000,
+        apyBps,
+      });
+    }
+    return positions;
+  } catch(e) {
+    console.warn("[PrivARC] loadStakingPositionsFromChain failed:", e.message);
+    return null; // null = fallback to localStorage
+  }
+}
 
 // Reconcile local notes with on-chain events for the connected wallet
 // Deposits are public (commitment + token + amount emitted on-chain)
@@ -2261,7 +2422,7 @@ function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = 
               <div style={{ fontSize:8, color: isActionable ? "#64748b" : "#334155", fontFamily:"monospace", marginBottom:3 }}>{t.sym}</div>
               <div style={{ fontSize:11, color: isClickable ? t.color : "#334155", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.val)}</div>
               {isClickable  && <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>}
-              {!isActionable && <div style={{ fontSize:6, color:"#1e293b", fontFamily:"monospace", marginTop:2 }}>not used here</div>}
+              {!isActionable && <div style={{ fontSize:6, color:"#475569", fontFamily:"monospace", marginTop:2 }}>non utilisé ici</div>}
             </button>
           );
         })}
@@ -3745,24 +3906,27 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
 
   useEffect(() => { loadStakingData(); const id = setInterval(loadStakingData, 15000); return () => clearInterval(id); }, [loadStakingData]);
 
-  // Local staking positions stored per wallet in localStorage
-  const [stakingNotes, setStakingNotes] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
-    } catch { return []; }
-  });
-
-  // Re-load notes when account changes
-  useEffect(() => {
-    try {
-      const n = JSON.parse(localStorage.getItem(`privarc_stakes_${account?.address || "x"}`) || "[]");
-      setStakingNotes(n);
-    } catch {}
-  }, [account?.address]);
+  // Staking positions — cross-device: prefer on-chain data, fallback to localStorage cache
+  const [stakingNotes, setStakingNotes] = useState([]);
 
   const saveNotes = useCallback((notes) => {
     try { localStorage.setItem(`privarc_stakes_${account?.address || "x"}`, JSON.stringify(notes)); } catch {}
     setStakingNotes(notes);
+  }, [account?.address]);
+
+  // Re-load notes when account changes — pull from chain first for cross-device sync
+  useEffect(() => {
+    if (!account?.address) { setStakingNotes([]); return; }
+    // Immediately show localStorage cache
+    let cached = [];
+    try { cached = JSON.parse(localStorage.getItem(`privarc_stakes_${account.address}`) || "[]"); } catch {}
+    setStakingNotes(cached);
+    // Then replace with on-chain truth (getUserStakes)
+    loadStakingPositionsFromChain(account.address).then(positions => {
+      if (positions === null) return; // call failed — keep localStorage
+      setStakingNotes(positions);
+      try { localStorage.setItem(`privarc_stakes_${account.address}`, JSON.stringify(positions)); } catch {}
+    }).catch(() => {});
   }, [account?.address]);
 
   const totalStakedLocal = stakingNotes.reduce((a, n) => a + Number(n.amount || 0), 0);
@@ -3788,16 +3952,24 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
         buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: buildStakeCalldata(amtWei, lk.sec) }),
       });
       if (stakeOk) {
-        const stakeId = Date.now(); // used as on-chain stakeId approximation
-        const updated = [...stakingNotes, {
-          id:         stakeId,
+        // Optimistic local update — so the position appears immediately without waiting for chain scan
+        const optimistic = [...stakingNotes, {
+          id:         Date.now(),
           amount:     Number(stakeAmt),
           lockDays:   Number(lock),
-          unlockedAt: Date.now() + lk.sec * 1000,  // ← consistent field name
+          unlockedAt: Date.now() + lk.sec * 1000,
           stakedAt:   Date.now(),
         }];
-        saveNotes(updated);
+        saveNotes(optimistic);
         loadStakingData();
+        // After a short delay, replace with authoritative on-chain data (cross-device truth)
+        setTimeout(() => {
+          loadStakingPositionsFromChain(account?.address).then(positions => {
+            if (positions === null || positions.length === 0) return;
+            setStakingNotes(positions);
+            try { localStorage.setItem(`privarc_stakes_${account?.address}`, JSON.stringify(positions)); } catch {}
+          }).catch(() => {});
+        }, 4000);
       }
     }
     setStakeAmt(""); setStaking(false);
@@ -3811,8 +3983,16 @@ function StakingPanel({ account, usdcBalance, onArc, notify, refreshBalance }) {
       description: `Unstaking ${note.amount.toFixed(2)} USDC`,
       buildTx: () => ({ to: CONTRACTS.Staking, value: "0x0", data: SEL.unstake + encodeUint256(BigInt(noteIdx)) }),
     });
+    // Optimistic local removal, then refresh from chain
     saveNotes(stakingNotes.filter((_, i) => i !== noteIdx));
     loadStakingData();
+    setTimeout(() => {
+      loadStakingPositionsFromChain(account?.address).then(positions => {
+        if (positions === null) return;
+        setStakingNotes(positions);
+        try { localStorage.setItem(`privarc_stakes_${account?.address}`, JSON.stringify(positions)); } catch {}
+      }).catch(() => {});
+    }, 4000);
   };
 
   const claim = async () => {
