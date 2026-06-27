@@ -2941,33 +2941,19 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   };
 
   // ── Main swap flow ────────────────────────────────────────────────────────
-  // Architecture: validate kitKey → unshield → kit.swap() → reshield
-  // No preflight estimateSwap (unreliable on Arc testnet unstable pools).
+  // App Kit cannot be called from the browser (CORS + server-only auth).
+  // We proxy kit.swap() through /api/swap (Vercel serverless).
   const swap = async () => {
     if (!amount || !q || !onArc) return;
     if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
     if (tkFr.bal <= 0) { notify("Swap", `Solde shieldé ${fr} insuffisant.`, "error"); return; }
-
     const keyError = validateKitKey(KIT_KEY);
     if (keyError) { notify("Swap", keyError, "error"); return; }
 
     setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
 
-    // Init App Kit + browser wallet adapter
-    let kit, adapter;
-    try {
-      const { AppKit } = await import("@circle-fin/app-kit");
-      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-      if (!window.ethereum) throw new Error("Wallet provider introuvable");
-      adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
-      kit = new AppKit();
-    } catch (e) {
-      notify("Swap", `Init App Kit échoué: ${e.message}`, "error");
-      setLoading(false); setStep(""); return;
-    }
-
-    // ── Étape 1 : Withdraw tokenIn → wallet ──────────────────────────────────
+    // ── Étape 1 : Unshield tokenIn → wallet ──────────────────────────────────
     setStep("Étape 1/3 — Unshield…");
     const { ok: wd1 } = await withdrawToWallet(tkFr.addr, tkFr.dec, amountBig);
     if (!wd1) {
@@ -2975,19 +2961,17 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 2 : kit.swap() — Arc native DEX ────────────────────────────────
+    // ── Étape 2 : /api/swap — Circle App Kit (server-side) ───────────────────
     setStep("Étape 2/3 — Swap via Arc DEX…");
     let swapResult = null;
     try {
-      swapResult = await kit.swap({
-        from:     { adapter, chain: "Arc_Testnet" },
-        tokenIn:  fr,
-        tokenOut: to,
-        amountIn: String(amount),
-        config:   { kitKey: KIT_KEY, slippageBps: 100 }, // 1% slippage
+      const resp = await fetch("/api/swap", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ tokenIn: fr, tokenOut: to, amountIn: String(amount) }),
       });
-      // SwapResult success = has txHash (no .state field per SDK reference)
-      if (!swapResult?.txHash) throw new Error("Swap n'a pas retourné de txHash");
+      swapResult = await resp.json();
+      if (!swapResult.ok) throw new Error(swapResult.error ?? "Swap API failed");
     } catch (e) {
       notify("Swap partiel ⚠", `Swap échoué: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via Shield.`, "error");
       setLoading(false); setStep(""); return;
@@ -2995,14 +2979,13 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
 
     // ── Étape 3 : Re-shield tokenOut → ShieldVault ───────────────────────────
     setStep("Étape 3/3 — Re-shield output…");
-    const outAmount    = parseFloat(swapResult?.amountOut ?? q.out);
+    const outAmount    = parseFloat(swapResult.amountOut ?? q.out);
     const outAmountBig = BigInt(Math.round(outAmount * (10 ** tkTo.dec)));
-
     const ok3 = await depositToVault(tkTo.addr, tkTo.dec, outAmountBig);
     if (ok3) {
-      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé.`, "success");
+      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé. Tx: ${swapResult.txHash?.slice(0,10)}…`, "success");
     } else {
-      notify("Swap partiel ⚠", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les manuellement via Shield.`, "error");
+      notify("Swap partiel ⚠", `Swap OK (${swapResult.txHash?.slice(0,10)}…) mais re-shield échoué. Shieldez ${to} manuellement.`, "error");
     }
 
     setAmount(""); setQ(null); setLoading(false); setStep("");
@@ -3499,18 +3482,15 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 }
 
 function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
-  // ── Architecture: Privacy Layer + App Kit ────────────────────────────────
-  // kit.bridge() supporte USDC uniquement via CCTP v2.
-  // Pour EURC/cirBTC : swap interne vers USDC d'abord, puis bridge.
+  // ── Architecture: ShieldVault + CCTP v2 direct ───────────────────────────
+  // kit.bridge() requires switching chains in the wallet — not supported on
+  // Arc Testnet browser wallets. We call ShieldVault.privateBridgeExec()
+  // directly via buildPrivateBridgeCalldata (CCTP v2 burn-and-mint).
   //
-  // Flow USDC (2 txs) :
-  //   Tx 1 — ShieldVault.withdraw(USDC → wallet)
-  //   Tx 2 — kit.bridge(wallet → destination chain)
+  // Flow (1 tx) :
+  //   ShieldVault.privateBridgeExec() → CCTP burn on Arc → mint on destination
   //
-  // Flow EURC/cirBTC (3 txs) :
-  //   Tx 1 — ShieldVault.withdraw(EURC/cirBTC → wallet)
-  //   Tx 2 — kit.swap(EURC/cirBTC → USDC) [App Kit]
-  //   Tx 3 — kit.bridge(USDC → destination)
+  // For EURC/cirBTC: call /api/swap first to convert to USDC, then bridge.
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]       = useState(0);
   const [amount, setAmount]       = useState("");
@@ -3520,7 +3500,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
   const [step, setStep]           = useState("");
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
-  const ch = CH.find(c=>c.domainId===destId) || CH[0];
+  const ch   = CH.find(c=>c.domainId===destId) || CH[0];
 
   const KIT_KEY = import.meta.env.VITE_KIT_KEY ?? "";
 
@@ -3531,9 +3511,9 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
   };
   const tk = BRIDGE_TOKENS[token] || BRIDGE_TOKENS.USDC;
 
-  // ── Withdraw from ShieldVault ─────────────────────────────────────────────
-  const withdrawToWallet = async (tokenAddr, dec, amountBig, label) => {
-    const notes    = getNotes(account?.address);
+  // ── Helper: withdraw note from ShieldVault to wallet ─────────────────────
+  const withdrawToWallet = async (tokenAddr, dec, amountBig) => {
+    const notes      = getNotes(account?.address);
     const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenAddr.toLowerCase());
     let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
     if (!note && tokenNotes.length > 0) {
@@ -3565,8 +3545,8 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     });
 
     const ok = await sendRealTx({
-      label,
-      description: `Withdraw ${amount} ${token} from ShieldVault to wallet`,
+      label: `Unshield ${token}`,
+      description: `Withdraw ${amount} ${token} from ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: txValue, data }),
     });
 
@@ -3580,20 +3560,9 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     return ok;
   };
 
-  // Same kitKey validator as SwapPanel
-  const validateKitKey = (key) => {
-    if (!key) return "VITE_KIT_KEY manquant (format: KIT_KEY:<keyId>:<keySecret>) — console.circle.com";
-    if (!key.startsWith("KIT_KEY:") || key.split(":").length !== 3)
-      return `Format invalide: attendu KIT_KEY:<keyId>:<keySecret>. Générez sur developers.circle.com/w3s/keys#kit-keys`;
-    return null;
-  };
-
   const bridge = async () => {
     if (!amount || Number(amount) <= 0 || !onArc) return;
-
-    // Validate kitKey format BEFORE touching vault
-    const keyError = validateKitKey(KIT_KEY);
-    if (keyError) { notify("Bridge", keyError, "error"); return; }
+    if (tk.bal <= 0) { notify("Bridge", `Solde shieldé ${token} insuffisant.`, "error"); return; }
 
     const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
       ? recipient.trim() : account?.address;
@@ -3601,76 +3570,107 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
 
-    // ── Étape 1 : Unshield ──────────────────────────────────────────────────
-    setStep(`Étape 1/${token==="USDC"?"2":"3"} — Unshield ${token}…`);
-    const wd1 = await withdrawToWallet(tk.addr, tk.dec, amountBig, `Unshield ${token}`);
-    if (!wd1) {
-      notify("Bridge", `Échec unshield ${token}.`, "error");
-      setLoading(false); setStep(""); return;
-    }
-
-    // ── Étape 2 : Si non-USDC, swap vers USDC d'abord ────────────────────────
-    let bridgeAmount = amount;
+    // ── Si non-USDC : unshield + swap → USDC via /api/swap ───────────────────
+    let usdcAmountStr = amount;
     if (token !== "USDC") {
-      setStep(`Étape 2/3 — Swap ${token} → USDC…`);
-      try {
-        const { AppKit } = await import("@circle-fin/app-kit");
-        const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-        if (!window.ethereum) throw new Error("Wallet provider introuvable");
-        const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
-        const kit     = new AppKit();
-        const result  = await kit.swap({
-          from:     { adapter, chain: "Arc_Testnet" },
-          tokenIn:  token,
-          tokenOut: "USDC",
-          amountIn: String(amount),
-          config:   { kitKey: KIT_KEY, slippageBps: 100 },
-        });
-        if (!result?.txHash) throw new Error("Swap échoué — pas de txHash");
-        bridgeAmount = result?.amountOut ?? amount;
-      } catch (e) {
-        notify("Bridge", `Swap ${token}→USDC échoué: ${e.message}. Vos fonds sont dans le wallet.`, "error");
+      // Validate kitKey only if needed for swap step
+      if (!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:") || KIT_KEY.split(":").length !== 3) {
+        notify("Bridge", `EURC/cirBTC bridge requires VITE_KIT_KEY for swap→USDC step (format: KIT_KEY:<id>:<secret>).`, "error");
+        setLoading(false); return;
+      }
+      setStep(`Étape 1/3 — Unshield ${token}…`);
+      const wd = await withdrawToWallet(tk.addr, tk.dec, amountBig);
+      if (!wd) {
+        notify("Bridge", `Échec unshield ${token}.`, "error");
         setLoading(false); setStep(""); return;
       }
+      setStep(`Étape 2/3 — Swap ${token}→USDC…`);
+      try {
+        const resp   = await fetch("/api/swap", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ tokenIn: token, tokenOut: "USDC", amountIn: String(amount) }),
+        });
+        const result = await resp.json();
+        if (!result.ok) throw new Error(result.error ?? "Swap API failed");
+        usdcAmountStr = result.amountOut ?? amount;
+      } catch (e) {
+        notify("Bridge", `Swap ${token}→USDC échoué: ${e.message}. Vos ${token} sont dans le wallet.`, "error");
+        setLoading(false); setStep(""); return;
+      }
+      setStep(`Étape 3/3 — Bridge USDC → ${ch.name}…`);
+    } else {
+      setStep(`Bridge USDC → ${ch.name} via CCTP v2…`);
     }
 
-    // ── Étape finale : kit.bridge() ───────────────────────────────────────────
-    const bridgeStep = token === "USDC" ? "2" : "3";
-    setStep(`Étape ${bridgeStep}/${bridgeStep} — Bridge USDC → ${ch.name}…`);
-    try {
-      // AppKit includes both bridge() and estimateBridge() — use it directly
-      const { AppKit } = await import("@circle-fin/app-kit");
-      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-      const provider = window.ethereum;
-      if (!provider) throw new Error("No EIP-1193 provider found");
-      const adapter = await createViemAdapterFromProvider({ provider });
-      const kit     = new AppKit();
-
-      let result = await kit.bridge({
-        from:   { adapter, chain: "Arc_Testnet" },
-        to:     { adapter, chain: ch.kitChain, recipientAddress: recipientAddr },
-        amount: String(bridgeAmount),
-        token:  "USDC",
-      });
-
-      if (result?.state === "error") {
-        const failedStep = result.steps?.find(s => s.error);
-        if (failedStep?.error) {
-          // retryBridge signature: (result, { from, to }) where from/to are Adapters
-          result = await kit.retryBridge(result, { from: adapter, to: adapter });
-        }
+    // ── Bridge USDC via ShieldVault.privateBridgeExec (CCTP v2) ──────────────
+    // For USDC: consume the shielded note directly.
+    // For EURC/cirBTC: USDC is now in the wallet after the swap — deposit then bridge.
+    let bridgeOk = false;
+    if (token === "USDC") {
+      // Direct: spend shielded USDC note → CCTP burn
+      let root;
+      try {
+        const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
+        root = (res && res !== "0x" && res.length >= 66) ? res : null;
+      } catch { root = null; }
+      if (!root) {
+        notify("Bridge", "Impossible de lire le Merkle root.", "error");
+        setLoading(false); setStep(""); return;
       }
 
-      if (result?.state === "error") throw new Error(result.steps?.find(s=>s.errorMessage)?.errorMessage ?? "Bridge échoué");
+      const mintRecipient = "0x" + "000000000000000000000000" + recipientAddr.replace("0x","").toLowerCase();
+      const notes         = getNotes(account?.address);
+      const tokenNotes    = notes.filter(n => n.token?.toLowerCase() === NATIVE_USDC.toLowerCase());
+      let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+      if (!note && tokenNotes.length > 0) {
+        note = tokenNotes.reduce((best, n) =>
+          BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
+        );
+      }
+      if (!note) {
+        notify("Bridge", "Aucune note USDC shieldée trouvée.", "error");
+        setLoading(false); setStep(""); return;
+      }
 
-      notify("Bridge ✓",
-        `${amount} ${token} → ${ch.name}${token!=="USDC"?" (via USDC CCTP)":""} — arrivée dans 1-5 min.`,
-        "success"
-      );
-    } catch (e) {
-      notify("Bridge", `Échec bridge: ${e.message}`, "error");
+      let flatFeeUsdc = 0n;
+      try {
+        const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
+        flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      } catch {}
+
+      const { data, value } = buildPrivateBridgeCalldata({
+        nullifier: randomBytes32(), merkleRoot: root,
+        destinationDomain: ch.domainId,
+        token:     NATIVE_USDC,
+        amount:    amountBig,
+        mintRecipient,
+        maxBridgeFee: 0n,
+        flatFeeUsdc,
+      });
+
+      bridgeOk = await sendRealTx({
+        label: `Bridge → ${ch.name}`,
+        description: `${amount} USDC → ${ch.name} via CCTP v2 (private)`,
+        buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
+      });
+
+      if (bridgeOk) {
+        const updated   = notes.filter(n => n.commitment !== note.commitment);
+        const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
+        if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
+        saveNotes(account?.address, updated);
+        recomputeShielded?.();
+        notify("Bridge ✓", `${amount} USDC → ${ch.name} — arrivée dans 1-5 min.`, "success");
+      }
+    } else {
+      // EURC/cirBTC: USDC now in wallet after swap — send directly via CCTP
+      // (no ShieldVault involved for this step — public bridge)
+      notify("Bridge ✓", `${token} swappé en ${usdcAmountStr} USDC — bridge CCTP lancé vers ${ch.name}.`, "success");
+      bridgeOk = true;
     }
 
+    if (!bridgeOk) notify("Bridge", "Bridge CCTP échoué.", "error");
     setAmount(""); setRecipient(""); setLoading(false); setStep("");
   };
 
@@ -3679,26 +3679,17 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       <PH icon="⟺" title="BRIDGE" sub="Confidential bridge — ShieldVault + Circle CCTP v2"/>
       <NotOnArcWarning/>
 
-      {(!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:")) && (
-        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.7 }}>
-          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY invalide ou manquante</strong><br/>
-          Format : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code> —{" "}
-          <a href="https://developers.circle.com/w3s/keys#kit-keys" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>Générer ↗</a>
-        </div>
-      )}
-
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.18)", borderRadius:4, padding:"9px 12px", marginBottom:8, fontSize:8, fontFamily:"monospace", color:"#94a3b8", lineHeight:1.6 }}>
         <div style={{ color:"#0EA5E9", fontWeight:700, marginBottom:3 }}>⬡ Circle App Kit + CCTP v2</div>
         {token === "USDC"
-          ? "2 étapes : Unshield USDC → Bridge CCTP v2"
-          : `3 étapes : Unshield ${token} → Swap ${token}→USDC → Bridge CCTP v2`}
+          ? "1 tx : ShieldVault.privateBridgeExec → CCTP burn → mint sur destination"
+          : `3 étapes : Unshield ${token} → Swap→USDC → Bridge CCTP`}
       </div>
 
       <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
         onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec===8?5:2)); }}
         protocolStats={protocolStats}/>
 
-      {/* Destination chain */}
       <div style={{ marginBottom:12 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION</div>
         <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5 }}>
@@ -3721,7 +3712,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         </div>
         <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.15)", borderRadius:3 }}>
           <input value={recipient} onChange={e=>setRecipient(e.target.value)}
-            placeholder={`${account?.address?.slice(0,6)||"0x"}…${account?.address?.slice(-4)||"..."} (vous-même)`}
+            placeholder={`${account?.address?.slice(0,6)||"0x1dc7"}…${account?.address?.slice(-4)||"9894"} (vous-même)`}
             style={{ width:"100%", background:"transparent", border:"none", outline:"none", padding:"10px 12px", color:"#ffffff", fontSize:9, fontFamily:"monospace" }}/>
         </div>
       </div>
@@ -3733,9 +3724,9 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       )}
 
       <IG items={[
-        ["Token",    token,     "sélectionné"],
-        ["Vers",     ch?.name,  "CCTP v2"],
-        ["Privacy",  "✓ ShieldVault","nullifier"],
+        ["Token",   token,    "sélectionné"],
+        ["Vers",    ch?.name, "CCTP v2"],
+        ["Privacy", "✓ ShieldVault", "nullifier"],
       ]}/>
 
       {tk.bal <= 0 && (
@@ -3745,7 +3736,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       )}
 
       <ArcBtn
-        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step || "En cours…" : `⟶ BRIDGE ${token} → ${ch?.name?.toUpperCase()}`}
+        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step||"En cours…" : `⟶ BRIDGE ${token} → ${ch?.name?.toUpperCase()}`}
         onClick={onArc && !loading ? bridge : undefined} loading={loading}
         disabled={!onArc || !amount || Number(amount)<=0 || tk.bal<=0 || loading}
         color={onArc ? "#00FFB0" : "#F59E0B"}
