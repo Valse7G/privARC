@@ -1293,8 +1293,9 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   }, [account?.address, onArc, recomputeShielded, sendViewKeyTx, notify]);
 
   const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, setPanel, protocolStats, shieldedBals, recomputeShielded };
-  // Expose address for ShieldedWallet stale-notes purge button
+  // Expose address + recompute for ShieldedWallet stale-notes purge button
   useEffect(() => { window._privarcAccount = account?.address || ""; }, [account?.address]);
+  useEffect(() => { window._privarcRecomputeShielded = recomputeShielded; }, [recomputeShielded]);
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -2428,10 +2429,21 @@ function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = 
           <span
             onClick={() => {
               try {
-                const key = `privarc_notes_${window._privarcAccount?.toLowerCase?.() || ""}`;
-                localStorage.removeItem(key);
-                window.dispatchEvent(new StorageEvent("storage", { key }));
-              } catch {}
+                // notesKey() format: privarc_notes_{addr}_{vaultAddr}
+                // We must use the same key format or we miss the entry
+                const addr  = window._privarcAccount?.toLowerCase?.() || "";
+                const vault = (typeof CONTRACTS !== "undefined" ? CONTRACTS.ShieldVault : "").toLowerCase();
+                const key   = addr && vault ? `privarc_notes_${addr}_${vault}` : null;
+                if (key) localStorage.removeItem(key);
+                // Also clear legacy key format (no vault suffix)
+                if (addr) localStorage.removeItem(`privarc_notes_${addr}`);
+                // Trigger recompute via storage event (cross-tab) AND direct callback
+                if (key) window.dispatchEvent(new StorageEvent("storage", { key }));
+                // Direct recompute if callback available
+                if (typeof window._privarcRecomputeShielded === "function") {
+                  window._privarcRecomputeShielded();
+                }
+              } catch(e) { console.warn("purge failed:", e); }
             }}
             style={{ color:"#f87171", textDecoration:"underline", cursor:"pointer" }}
           >Purger les notes obsolètes</span>
