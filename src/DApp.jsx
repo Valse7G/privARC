@@ -1293,6 +1293,8 @@ function Dashboard({ user, prices, changes, change24h, lastUpdate, priceError })
   }, [account?.address, onArc, recomputeShielded, sendViewKeyTx, notify]);
 
   const panelProps = { account, balance, usdcBalance, onArc, notify, refreshBalance, txHistory, loadingBal, prices, changes, change24h, lastUpdate, priceError, setPanel, protocolStats, shieldedBals, recomputeShielded };
+  // Expose address for ShieldedWallet stale-notes purge button
+  useEffect(() => { window._privarcAccount = account?.address || ""; }, [account?.address]);
 
   return (
     <div style={{ display:"flex", height:"100vh", width:"100%", maxWidth:960, margin:"0 auto", position:"relative", zIndex:2 }}>
@@ -2244,52 +2246,56 @@ async function loadStakingPositionsFromChain(address) {
 // Deposits are public (commitment + token + amount emitted on-chain)
 // We add any deposit we don't already have in local notes
 async function reconcileNotesOnChain(address) {
+  // ── Design note ────────────────────────────────────────────────────────────
+  // The Deposited event does NOT index the depositor address, so we cannot
+  // filter logs by wallet. Blindly adding every Deposited event to the connected
+  // wallet's notes was a critical bug: it inflated the ShieldedWallet balance
+  // with deposits from ALL wallets, creating a false > TVL reading.
+  //
+  // Cross-device note recovery is handled exclusively by:
+  //   1. scanStealthNotes() — decrypts self-addressed encrypted notes relayed on-chain
+  //   2. buildTxHistoryFromChain() — reconstructs tx history from indexed events
+  //
+  // This function now only checks for spent nullifiers to prune already-withdrawn
+  // notes from localStorage — keeping local notes in sync with on-chain state.
   if (!address) return;
   try {
     const blockHex = await rpcCall("eth_blockNumber", []);
     const current  = parseInt(blockHex, 16);
-    const from     = "0x" + Math.max(0, current - 5_000_000).toString(16); // look back up to ~5M blocks
+    const from     = "0x" + Math.max(0, current - 5_000_000).toString(16);
 
-    // Fetch Deposited events from ShieldVault
+    // Fetch Withdrawn events to find spent nullifiers
     const logs = await rpcCall("eth_getLogs", [{
       fromBlock: from,
       toBlock:   "latest",
       address:   CONTRACTS.ShieldVault,
-      topics:    [EV.Deposited],
+      topics:    [EV.Withdrawn],
     }]);
     if (!Array.isArray(logs) || logs.length === 0) return;
 
-    const existing = getNotes(address);
-    const existingSet = new Set(existing.map(n => n.commitment));
-
-    let added = 0;
+    // Build set of spent nullifiers
+    const spentNullifiers = new Set();
     for (const log of logs) {
       try {
-        // Deposited(bytes32 indexed commitment, address indexed token, uint256 amount, uint256 leafIndex, bytes32 merkleRoot)
-        // topics[1] = commitment (indexed), topics[2] = token (indexed)
-        // data = abi.encode(amount, leafIndex, merkleRoot)
-        const commitment = log.topics?.[1];
-        const token      = log.topics?.[2] ? "0x" + log.topics[2].slice(26) : null;
-        const data       = log.data?.replace("0x", "") || "";
-        if (!commitment || !token || data.length < 192) continue;
-
-        const amount = BigInt("0x" + data.slice(0, 64));
-        const ts     = Date.now(); // approximate; block timestamp not in log here
-
-        // Only add if not already tracked
-        if (!existingSet.has(commitment)) {
-          existing.push({ commitment, amount: amount.toString(), token, ts, source: "onchain" });
-          existingSet.add(commitment);
-          added++;
-        }
+        const nullifier = log.topics?.[1]; // Withdrawn: bytes32 indexed nullifier
+        if (nullifier) spentNullifiers.add(nullifier.toLowerCase());
       } catch {}
     }
+    if (spentNullifiers.size === 0) return;
 
-    if (added > 0) {
-      saveNotes(address, existing);
+    // Prune notes whose nullifier has been spent on-chain
+    const existing = getNotes(address);
+    const pruned   = existing.filter(n => {
+      if (!n.nullifier) return true; // no nullifier stored → keep (can't verify)
+      return !spentNullifiers.has(n.nullifier.toLowerCase());
+    });
+
+    if (pruned.length < existing.length) {
+      saveNotes(address, pruned);
+      console.log(`[PrivARC] Pruned ${existing.length - pruned.length} spent note(s) for ${address.slice(0,8)}…`);
     }
   } catch (e) {
-    console.warn("[PrivARC] On-chain reconciliation failed:", e.message);
+    console.warn("[PrivARC] reconcileNotesOnChain failed:", e.message);
   }
 }
 
@@ -2357,12 +2363,25 @@ function useShieldedBalances(prices, address) {
 // ── ShieldedWallet mini-panel ─────────────────────────────────────────────────
 // Shown at top of Send / Swap / Withdraw / Bridge panels.
 // Displays per-token shielded balance + MAX buttons.
-function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = false }) {
+function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = false, protocolStats }) {
   // actionableFilter: tokens the user can actually act on in this panel.
   // Both old tokenFilter and new actionableFilter control clickability;
   // ALL 3 tokens are always displayed for visual uniformity across panels.
   const activeFilter = actionableFilter || tokenFilter;
   if (!bals) return null;
+
+  // ── Stale notes detection ────────────────────────────────────────────────
+  // If local notes claim more than the global TVL, they are stale (from a
+  // previous ShieldVault deployment). Show a warning so the user knows.
+  const globalUsdc = protocolStats?.shieldedUsdc != null ? Number(protocolStats.shieldedUsdc) / 1e6 : null;
+  const globalEurc = protocolStats?.shieldedEurc != null ? Number(protocolStats.shieldedEurc) / 1e6 : null;
+  const globalCbtc = protocolStats?.shieldedBtc  != null ? Number(protocolStats.shieldedBtc)  / 1e8 : null;
+  // A note is stale if its local balance exceeds the TOTAL protocol TVL for that token
+  // (impossible if the notes are from the current contract)
+  const staleUsdc = globalUsdc != null && bals.usdc > 0 && bals.usdc > globalUsdc + 0.01;
+  const staleEurc = globalEurc != null && bals.eurc > 0 && bals.eurc > globalEurc + 0.01;
+  const staleCbtc = globalCbtc != null && bals.cbtc > 0 && bals.cbtc > globalCbtc + 0.000001;
+  const hasStale  = staleUsdc || staleEurc || staleCbtc;
   const usdc  = bals.usdc  ?? 0;
   const eurc  = bals.eurc  ?? 0;
   const cbtc  = bals.cbtc  ?? 0;
@@ -2395,13 +2414,29 @@ function ShieldedWallet({ bals, onMax, tokenFilter, actionableFilter, compact = 
   }
 
   return (
-    <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"10px 12px", marginBottom:10 }}>
+    <div style={{ background:"rgba(0,255,176,.03)", border:`1px solid ${hasStale ? "rgba(248,113,113,.35)" : "rgba(0,255,176,.12)"}`, borderRadius:5, padding:"10px 12px", marginBottom:10 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
         <span style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace" }}>🛡 SHIELDED WALLET</span>
         <span style={{ fontSize:10, color:"#ffffff", fontFamily:"monospace", fontWeight:700 }}>
           ≈ ${totalUsd.toFixed(2)} <span style={{ fontSize:8, color:"#4a7c5f" }}>USD</span>
         </span>
       </div>
+      {hasStale && (
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"7px 10px", marginBottom:8, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.6 }}>
+          ⚠ Notes locales obsolètes détectées — ces soldes proviennent d'un ancien déploiement ShieldVault.
+          Le TVL on-chain actuel est inférieur à vos notes locales.{" "}
+          <span
+            onClick={() => {
+              try {
+                const key = `privarc_notes_${window._privarcAccount?.toLowerCase?.() || ""}`;
+                localStorage.removeItem(key);
+                window.dispatchEvent(new StorageEvent("storage", { key }));
+              } catch {}
+            }}
+            style={{ color:"#f87171", textDecoration:"underline", cursor:"pointer" }}
+          >Purger les notes obsolètes</span>
+        </div>
+      )}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:5 }}>
         {allTokens.map(t => {
           const isActionable = !activeFilter || activeFilter.includes(t.sym);
@@ -2741,7 +2776,7 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   );
 }
 
-function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
+function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
   const TK = ["USDC","EURC"];
   const [fr, setFr] = useState("USDC"); const [to, setTo] = useState("EURC");
   const [amount, setAmount] = useState(""); const [q, setQ] = useState(null); const [loading, setLoading] = useState(false);
@@ -2916,7 +2951,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
         </div>
       </div>
 
-      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }}/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }} protocolStats={protocolStats}/>
       <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:10 }}>
         <div style={{ display:"flex", gap:8, alignItems:"flex-end", marginBottom:10 }}><div style={{ flex:1 }}><OsField label="FROM" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⬆"/></div><TS v={fr} onChange={v=>{setFr(v);if(v===to)setTo(TK.find(t=>t!==v));}}/></div>
         <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}><button onClick={()=>{setFr(to);setTo(fr);setAmount("");setQ(null);}} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.25)", borderRadius:"50%", width:30, height:30, cursor:"pointer", color:"#00FFB0", fontSize:15, display:"flex", alignItems:"center", justifyContent:"center" }}>⇅</button></div>
@@ -2935,7 +2970,7 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
   );
 }
 
-function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
+function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
   const [to, setTo]=useState(""); const [amount, setAmount]=useState(""); const [loading, setLoading]=useState(false);
   const [mode, setMode]=useState("shielded");
   const [confirmTx, setConfirmTx] = useState(null);
@@ -3110,7 +3145,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       </div>
       {mode==="shielded"
         ? <>
-            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, raw, dec) => setAmount(val.toFixed(dec === 8 ? 5 : 2))}/>
+            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, raw, dec) => setAmount(val.toFixed(dec === 8 ? 5 : 2))} protocolStats={protocolStats}/>
             <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
               🛡 Confidential send — shielded balance is transferred with governed visibility. Sender and recipient addresses are not linked on-chain.
             </div>
@@ -3132,7 +3167,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   );
 }
 
-function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
+function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
   const [amount, setAmount]   = useState("");
   const [dest, setDest]       = useState("");
   const [loading, setLoading] = useState(false);
@@ -3257,7 +3292,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       <PH icon="↙" title="WITHDRAW" sub="Unshield — exit confidential balance to public address"/>
       <NotOnArcWarning/>
 
-      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }} protocolStats={protocolStats}/>
 
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Unshield — exit the confidential balance to a public address. Governed visibility: only you and parties you authorize can link deposit and withdrawal.
@@ -3293,7 +3328,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
   );
 }
 
-function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded }) {
+function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]       = useState(0);
   const [amount, setAmount]       = useState("");
@@ -3411,7 +3446,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit ↗</a>
       </div>
 
-            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
+            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }} protocolStats={protocolStats}/>
 
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Transfert cross-chain confidentiel. Destinataire à visibilité gouvernée.
