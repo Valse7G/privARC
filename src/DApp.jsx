@@ -2940,48 +2940,30 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     return null; // valid
   };
 
-  // ── Pre-flight check: estimate swap without touching vault ───────────────
-  // Uses AppKit (not SwapKit standalone) — AppKit has estimateSwap.
-  // kitKey goes in config (not from) per SDK reference.
-  const preflightSwap = async (kitKey) => {
-    const { AppKit } = await import("@circle-fin/app-kit");
-    const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-    const provider = window.ethereum;
-    if (!provider) throw new Error("No EIP-1193 provider found");
-    const adapter = await createViemAdapterFromProvider({ provider });
-    const kit = new AppKit();
-    // estimateSwap validates kitKey + checks liquidity WITHOUT executing any tx
-    const estimate = await kit.estimateSwap({
-      from:     { adapter, chain: "Arc_Testnet" },
-      tokenIn:  fr,
-      tokenOut: to,
-      amountIn: amount,
-      config:   { kitKey },
-    });
-    return { kit, adapter, estimate };
-  };
-
   // ── Main swap flow ────────────────────────────────────────────────────────
+  // Architecture: validate kitKey → unshield → kit.swap() → reshield
+  // No preflight estimateSwap (unreliable on Arc testnet unstable pools).
   const swap = async () => {
     if (!amount || !q || !onArc) return;
     if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
     if (tkFr.bal <= 0) { notify("Swap", `Solde shieldé ${fr} insuffisant.`, "error"); return; }
 
-    // ── Validate kitKey format FIRST — before any on-chain action ────────────
     const keyError = validateKitKey(KIT_KEY);
     if (keyError) { notify("Swap", keyError, "error"); return; }
 
     setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
 
-    // ── Étape 0 : Pre-flight — validate kitKey + get estimate (no vault touch) ─
-    setStep("Vérification App Kit…");
-    let kit, adapter, estimate;
+    // Init App Kit + browser wallet adapter
+    let kit, adapter;
     try {
-      ({ kit, adapter, estimate } = await preflightSwap(KIT_KEY));
+      const { AppKit } = await import("@circle-fin/app-kit");
+      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+      if (!window.ethereum) throw new Error("Wallet provider introuvable");
+      adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+      kit = new AppKit();
     } catch (e) {
-      // kitKey invalid or liquidity issue — abort BEFORE touching the vault
-      notify("Swap annulé", `Vérification App Kit échouée: ${e.message} — aucun fonds déplacé.`, "error");
+      notify("Swap", `Init App Kit échoué: ${e.message}`, "error");
       setLoading(false); setStep(""); return;
     }
 
@@ -2993,7 +2975,7 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 2 : kit.swap() — reuse pre-validated kit + adapter ─────────────
+    // ── Étape 2 : kit.swap() — Arc native DEX ────────────────────────────────
     setStep("Étape 2/3 — Swap via Arc DEX…");
     let swapResult = null;
     try {
@@ -3001,26 +2983,26 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
         from:     { adapter, chain: "Arc_Testnet" },
         tokenIn:  fr,
         tokenOut: to,
-        amountIn: amount,
-        config:   { kitKey: KIT_KEY, slippageBps: 50 }, // 0.5% slippage
+        amountIn: String(amount),
+        config:   { kitKey: KIT_KEY, slippageBps: 100 }, // 1% slippage
       });
-      if (swapResult?.state === "error") throw new Error(swapResult.error?.message ?? "Swap failed");
+      // SwapResult success = has txHash (no .state field per SDK reference)
+      if (!swapResult?.txHash) throw new Error("Swap n'a pas retourné de txHash");
     } catch (e) {
-      // Swap failed AFTER unshield — fonds sont dans le wallet, informer l'utilisateur
-      notify("Swap partiel ⚠", `Swap échoué après unshield: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via le panel Shield.`, "error");
+      notify("Swap partiel ⚠", `Swap échoué: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via Shield.`, "error");
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 3 : deposit tokenOut → ShieldVault ─────────────────────────────
+    // ── Étape 3 : Re-shield tokenOut → ShieldVault ───────────────────────────
     setStep("Étape 3/3 — Re-shield output…");
-    const outAmount    = parseFloat(swapResult?.amountOut ?? estimate?.estimatedOutput?.amount ?? q.out);
+    const outAmount    = parseFloat(swapResult?.amountOut ?? q.out);
     const outAmountBig = BigInt(Math.round(outAmount * (10 ** tkTo.dec)));
 
     const ok3 = await depositToVault(tkTo.addr, tkTo.dec, outAmountBig);
     if (ok3) {
       notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé.`, "success");
     } else {
-      notify("Swap partiel ⚠", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les via Shield.`, "error");
+      notify("Swap partiel ⚠", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les manuellement via Shield.`, "error");
     }
 
     setAmount(""); setQ(null); setLoading(false); setStep("");
@@ -3632,18 +3614,19 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     if (token !== "USDC") {
       setStep(`Étape 2/3 — Swap ${token} → USDC…`);
       try {
-        const { SwapKit } = await import("@circle-fin/swap-kit");
+        const { AppKit } = await import("@circle-fin/app-kit");
         const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+        if (!window.ethereum) throw new Error("Wallet provider introuvable");
         const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
-        const kit     = new SwapKit();
+        const kit     = new AppKit();
         const result  = await kit.swap({
           from:     { adapter, chain: "Arc_Testnet" },
           tokenIn:  token,
           tokenOut: "USDC",
-          amountIn: amount,
-          config:   { kitKey: KIT_KEY, slippageBps: 50 },
+          amountIn: String(amount),
+          config:   { kitKey: KIT_KEY, slippageBps: 100 },
         });
-        if (result?.state === "error") throw new Error(result.error?.message ?? "Swap failed");
+        if (!result?.txHash) throw new Error("Swap échoué — pas de txHash");
         bridgeAmount = result?.amountOut ?? amount;
       } catch (e) {
         notify("Bridge", `Swap ${token}→USDC échoué: ${e.message}. Vos fonds sont dans le wallet.`, "error");
