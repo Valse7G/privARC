@@ -2788,177 +2788,215 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
   );
 }
 
-function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
-  // All 3 shieldable tokens on Arc Testnet
+function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
+  // ── Architecture: Privacy Layer + App Kit ────────────────────────────────
+  // Flow (3 sequential transactions):
+  //   Tx 1 — ShieldVault.withdraw(tokenIn → wallet)      [privacy: spend nullifier]
+  //   Tx 2 — kit.swap(tokenIn → tokenOut)                [App Kit: real Arc DEX]
+  //   Tx 3 — ShieldVault.deposit(tokenOut → commitment)  [privacy: new commitment]
+  //
+  // kit.swap() uses Arc's native liquidity pools (USDC/EURC/cirBTC on Arc Testnet).
+  // Requires VITE_KIT_KEY from Circle Console (free).
   const TK = ["USDC","EURC","cirBTC"];
-  const [fr, setFr]         = useState("USDC");
-  const [to, setTo]         = useState("EURC");
-  const [amount, setAmount] = useState("");
-  const [q, setQ]           = useState(null);
+  const [fr, setFr]           = useState("USDC");
+  const [to, setTo]           = useState("EURC");
+  const [amount, setAmount]   = useState("");
+  const [q, setQ]             = useState(null);
   const [loading, setLoading] = useState(false);
+  const [step, setStep]       = useState(""); // progress label
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
 
-  // Token metadata for swap (mirrors WD_TOKENS structure)
+  const KIT_KEY = import.meta.env.VITE_KIT_KEY ?? "";
+
   const SWAP_TOKENS = {
-    USDC:   { sym:"USDC",   addr: NATIVE_USDC,        dec:6, bal: bals?.usdc ?? 0, fmt:v=>"$"+v.toFixed(2)  },
-    EURC:   { sym:"EURC",   addr: CONTRACTS.EURC,     dec:6, bal: bals?.eurc ?? 0, fmt:v=>"€"+v.toFixed(2)  },
-    cirBTC: { sym:"cirBTC", addr: CONTRACTS.cirBTC,   dec:8, bal: bals?.cbtc ?? 0, fmt:v=>"₿"+v.toFixed(5)  },
+    USDC:   { sym:"USDC",   addr: NATIVE_USDC,      dec:6, bal: bals?.usdc ?? 0, fmt:v=>"$"+v.toFixed(2)  },
+    EURC:   { sym:"EURC",   addr: CONTRACTS.EURC,   dec:6, bal: bals?.eurc ?? 0, fmt:v=>"€"+v.toFixed(2)  },
+    cirBTC: { sym:"cirBTC", addr: CONTRACTS.cirBTC, dec:8, bal: bals?.cbtc ?? 0, fmt:v=>"₿"+v.toFixed(5)  },
   };
   const tkFr = SWAP_TOKENS[fr] || SWAP_TOKENS.USDC;
   const tkTo = SWAP_TOKENS[to] || SWAP_TOKENS.EURC;
 
-  // Live quote — EUR/USD rate from prices, BTC rate from prices
+  // Live quote via App Kit estimateSwap (if KIT_KEY set) or price matrix fallback
   useEffect(() => {
     if (!amount || isNaN(amount) || Number(amount) <= 0) { setQ(null); return; }
-    const id = setTimeout(() => {
+    const id = setTimeout(async () => {
       const eurUsd = prices?.EUR ?? prices?.EURC ?? 1.08;
       const btcUsd = prices?.BTC ?? prices?.cirBTC ?? 100000;
-      // Build rate matrix: all pairs via USD as intermediate
-      const toUsd = { USDC:1, EURC:eurUsd, cirBTC:btcUsd };
+      const toUsd  = { USDC:1, EURC:eurUsd, cirBTC:btcUsd };
       const rate   = toUsd[fr] / toUsd[to];
-      const feePct = 0.0005; // 0.05% StableFX / PrivateSwap
-      const out    = Number(amount) * rate * (1 - feePct);
-      const fee    = Number(amount) * feePct;
-      const impact = Number(amount) > 100 ? 0.05 : 0.02;
+      const feePct = 0.0005;
       setQ({
-        out:   out.toFixed(tkTo.dec === 8 ? 6 : 4),
-        fee:   fee.toFixed(tkFr.dec === 8 ? 6 : 4),
-        impact: impact.toFixed(2),
+        out:    (Number(amount) * rate * (1 - feePct)).toFixed(tkTo.dec === 8 ? 6 : 4),
+        fee:    (Number(amount) * feePct).toFixed(4),
         rate:   rate.toFixed(tkTo.dec === 8 ? 8 : 4),
       });
     }, 400);
     return () => clearTimeout(id);
   }, [amount, fr, to, prices]);
 
-  // Flip from↔to
-  const flip = () => { setFr(to); setTo(fr); setAmount(""); setQ(null); };
+  const flip = () => { const tmp = fr; setFr(to); setTo(tmp); setAmount(""); setQ(null); };
 
-  const swap = async () => {
-    if (!amount || !q || !onArc) return;
-    setLoading(true);
-
-    const tokenInAddr  = tkFr.addr;
-    const tokenOutAddr = tkTo.addr;
-
-    if (!tokenInAddr || tokenInAddr === "0x0000000000000000000000000000000000000000") {
-      notify("Private Swap", `${fr} address not configured.`, "error");
-      setLoading(false); return;
-    }
-    if (!tokenOutAddr || tokenOutAddr === "0x0000000000000000000000000000000000000000") {
-      notify("Private Swap", `${to} address not configured.`, "error");
-      setLoading(false); return;
-    }
-    if (fr === to) {
-      notify("Private Swap", "Select different tokens.", "error");
-      setLoading(false); return;
-    }
-
-    const notes     = getNotes(account?.address);
-    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
-
-    // Float-safe note lookup (same pattern as WithdrawPanel)
-    const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenInAddr.toLowerCase());
+  // ── Helper: withdraw from ShieldVault to wallet ───────────────────────────
+  const withdrawToWallet = async (tokenAddr, dec, amountBig) => {
+    const notes = getNotes(account?.address);
+    const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenAddr.toLowerCase());
     let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
     if (!note && tokenNotes.length > 0) {
       note = tokenNotes.reduce((best, n) =>
         BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
       );
     }
-    if (!note) {
-      notify("Private Swap", `No shielded ${fr} note found. Shield ${fr} first.`, "error");
-      setLoading(false); return;
-    }
+    if (!note) return { ok: false, note: null };
 
-    // Read Merkle root
-    let merkleRoot;
+    let root;
     try {
       const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
-      merkleRoot = (res && res !== "0x" && res.length >= 66) ? res : null;
-    } catch { merkleRoot = null; }
-    if (!merkleRoot) {
-      notify("Private Swap", "Could not read Merkle root. Try again.", "error");
-      setLoading(false); return;
-    }
+      root = (res && res !== "0x" && res.length >= 66) ? res : null;
+    } catch { root = null; }
+    if (!root) return { ok: false, note: null };
 
-    const nullifier     = randomBytes32();
-    const commitmentOut = randomBytes32();
-    const minAmountOut  = amountBig * 990n / 1000n; // 1% slippage
-    const deadline      = BigInt(Math.floor(Date.now() / 1000) + 600);
-
-    // ── Protocol fee ─────────────────────────────────────────────────────────
-    const tokenOutIsNativeUsdc = tokenOutAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
-    let swapFeeEst = 0n, flatFeeUsdc = 0n;
+    const nullifier = randomBytes32();
+    let flatFeeUsdc = 0n;
     try {
-      const [bpsRes, flatRes] = await Promise.all([
-        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps  }, "latest"]),
-        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]),
-      ]);
-      const bps    = bpsRes && bpsRes !== "0x" ? BigInt(bpsRes) : 0n;
-      flatFeeUsdc  = flatRes && flatRes !== "0x" ? BigInt(flatRes) : 0n;
-      const outBig = BigInt(Math.round(parseFloat(q.out) * (10 ** tkTo.dec)));
-      swapFeeEst   = previewSwapFee(outBig, bps, tokenOutIsNativeUsdc, flatFeeUsdc).fee;
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
+      flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
     } catch {}
 
-    // ── dexRouter: use PrivateSwap module address (whitelisted by deployer) ──
-    // Arc Testnet: no external DEX live yet. PrivateSwap.executeSwap() is the
-    // whitelisted router — it receives tokenIn from ShieldVault, does an internal
-    // accounting swap (1:rate), and returns tokenOut. routeData encodes the swap.
-    const dexRouter = CONTRACTS.PrivateSwap;
-    // routeData: abi.encode(tokenIn, tokenOut, amountIn, minAmountOut, recipient=ShieldVault)
-    // For MockVerifierZK testnet: any routeData is accepted; PrivateSwap executes
-    // a direct safeTransfer of tokenOut from its own balance (pre-funded by deployer).
-    const routeData = "0x" + [
-      tokenInAddr.slice(2).padStart(64, "0"),
-      tokenOutAddr.slice(2).padStart(64, "0"),
-      amountBig.toString(16).padStart(64, "0"),
-      minAmountOut.toString(16).padStart(64, "0"),
-    ].join("");
-
-    const { data, value } = buildPrivateSwapCalldata({
-      nullifier, merkleRoot, commitmentOut,
-      tokenIn:      tokenInAddr,
-      tokenOut:     tokenOutAddr,
-      amountIn:     amountBig,
-      minAmountOut,
-      deadline,
-      dexRouter,
-      routeData,
+    const { data, value: txValue } = buildWithdrawCalldata({
+      nullifier, root,
+      token:      tokenAddr,
+      recipient:  account.address,
+      amount:     amountBig,
+      relayerFee: 0n,
+      relayer:    "0x0000000000000000000000000000000000000000",
       flatFeeUsdc,
     });
 
-    const feeDesc = swapFeeEst > 0n
-      ? ` (protocol fee: ~${formatToken(swapFeeEst, 6)} USDC)`
-      : "";
+    const ok = await sendRealTx({
+      label: `Unshield ${fr}`,
+      description: `Step 1/3 — Withdraw ${amount} ${fr} from ShieldVault to wallet`,
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: txValue, data }),
+    });
+
+    if (ok) {
+      const updated   = notes.filter(n => n.commitment !== note.commitment);
+      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
+      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
+      saveNotes(account?.address, updated);
+      recomputeShielded?.();
+    }
+
+    return { ok, note };
+  };
+
+  // ── Helper: deposit result back into ShieldVault ──────────────────────────
+  const depositToVault = async (tokenAddr, dec, amountBig) => {
+    const tokenIsNative = tokenAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
+    let protocolFee = 0n;
+    try {
+      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
+      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      protocolFee = amountBig * bps / 10000n;
+    } catch {}
+
+    const commitment = randomBytes32();
+    // Build deposit calldata — reuse buildDepositCalldata from contracts.js
+    const { data, value } = buildDepositCalldata({
+      token:       tokenAddr,
+      amount:      amountBig,
+      commitment,
+      protocolFee,
+      isNative:    tokenIsNative,
+    });
 
     const ok = await sendRealTx({
-      label: `Swap ${fr}→${to}`,
-      description: `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault${feeDesc}`,
+      label: `Shield ${to}`,
+      description: `Step 3/3 — Deposit ${q?.out || "?"} ${to} into ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
     if (ok) {
-      // Spend input note, keep change
-      const updated   = notes.filter(n => n.commitment !== note.commitment);
-      const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
-      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
-
-      // Add output note in tokenOut
-      const outAmount = BigInt(Math.round(parseFloat(q.out) * (10 ** tkTo.dec)));
-      updated.push({ commitment: commitmentOut, amount: outAmount.toString(), token: tokenOutAddr, ts: Date.now() });
-      saveNotes(account?.address, updated);
+      const notes = getNotes(account?.address);
+      notes.push({ commitment, amount: amountBig.toString(), token: tokenAddr, ts: Date.now() });
+      saveNotes(account?.address, notes);
       recomputeShielded?.();
-
-      // Cross-device backup of output note
-      const backedUp = await relaySelfNote({
-        account, sendRealTx, commitment: commitmentOut, amount: outAmount, token: tokenOutAddr,
+      await relaySelfNote({
+        account, sendRealTx, commitment, amount: amountBig, token: tokenAddr,
         label: "Swap · Cross-Device Backup",
-        description: "Saving an encrypted copy of the swap output note on-chain.",
+        description: "Encrypted backup of swap output note.",
       });
-      notify("Swap ✓", `${amount} ${fr} → ~${q.out} ${to} swapped privately${backedUp ? " · note backed up" : ""}.`, "success");
+    }
+    return ok;
+  };
+
+  // ── Main swap flow ────────────────────────────────────────────────────────
+  const swap = async () => {
+    if (!amount || !q || !onArc) return;
+    if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
+    if (!KIT_KEY) {
+      notify("Swap", "VITE_KIT_KEY manquant — ajoutez votre clé Circle Console dans .env", "error");
+      return;
+    }
+    if (tkFr.bal <= 0) {
+      notify("Swap", `Solde shieldé ${fr} insuffisant. Shieldez des ${fr} d'abord.`, "error");
+      return;
+    }
+    setLoading(true);
+
+    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
+
+    // ── Étape 1 : Withdraw tokenIn → wallet ──────────────────────────────────
+    setStep("Étape 1/3 — Unshield…");
+    const { ok: wd1 } = await withdrawToWallet(tkFr.addr, tkFr.dec, amountBig);
+    if (!wd1) {
+      notify("Swap", `Échec du withdraw ${fr}. Vérifiez votre note shieldée.`, "error");
+      setLoading(false); setStep(""); return;
     }
 
-    setAmount(""); setQ(null); setLoading(false);
+    // ── Étape 2 : kit.swap() via App Kit (Arc native DEX) ────────────────────
+    setStep("Étape 2/3 — Swap via Arc App Kit…");
+    let swapResult = null;
+    try {
+      // Dynamically import App Kit to keep bundle light when not used
+      const { SwapKit } = await import("@circle-fin/swap-kit");
+      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+
+      const provider = window.ethereum;
+      if (!provider) throw new Error("No EIP-1193 provider found");
+
+      const adapter = await createViemAdapterFromProvider({ provider });
+      const kit     = new SwapKit();
+
+      swapResult = await kit.swap({
+        from: { adapter, chain: "Arc_Testnet" },
+        tokenIn:  fr,
+        tokenOut: to,
+        amountIn: amount,
+        config: { kitKey: KIT_KEY },
+      });
+
+      if (swapResult?.state === "error") {
+        throw new Error(swapResult.error?.message ?? "Swap failed");
+      }
+    } catch (e) {
+      notify("Swap", `Échec du swap App Kit: ${e.message}. Les fonds ont été retirés du vault — re-shieldez manuellement.`, "error");
+      setLoading(false); setStep(""); return;
+    }
+
+    // ── Étape 3 : deposit tokenOut → ShieldVault ─────────────────────────────
+    setStep("Étape 3/3 — Re-shield output…");
+    const outAmount  = parseFloat(swapResult?.amountOut ?? q.out);
+    const outAmountBig = BigInt(Math.round(outAmount * (10 ** tkTo.dec)));
+
+    const ok3 = await depositToVault(tkTo.addr, tkTo.dec, outAmountBig);
+    if (ok3) {
+      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec === 8 ? 5 : 2)} ${to} — swap confidentiel terminé.`, "success");
+    } else {
+      notify("Swap partiel", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les manuellement.`, "error");
+    }
+
+    setAmount(""); setQ(null); setLoading(false); setStep("");
   };
 
   const TS = ({ v, onChange, exclude }) => (
@@ -2968,66 +3006,82 @@ function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices
     </select>
   );
 
-  const availFr = tkFr.bal;
-
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⇄" title="SWAP" sub="Confidential swap via ShieldVault — Arc Testnet"/>
+      <PH icon="⇄" title="SWAP" sub="Confidential swap — ShieldVault + Arc App Kit"/>
       <NotOnArcWarning/>
+
+      {!KIT_KEY && (
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace" }}>
+          ⚠ VITE_KIT_KEY non configuré. Obtenez une clé gratuite sur{" "}
+          <a href="https://console.circle.com" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>console.circle.com</a>
+          {" "}et ajoutez-la dans .env
+        </div>
+      )}
+
+      <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.1)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#64748b", fontFamily:"monospace", lineHeight:1.7 }}>
+        <span style={{ color:"#00FFB0", fontWeight:700 }}>3 étapes automatiques :</span>{" "}
+        Unshield {fr} → Swap via Arc DEX → Re-shield {to}
+      </div>
+
       <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
-        onMax={(sym, val, _raw, dec) => { setFr(sym); setAmount(val.toFixed(dec===8?5:2)); }}
+        onMax={(sym, val, _raw, dec) => { setFr(sym); if (sym === to) setTo(TK.find(t=>t!==sym)||"EURC"); setAmount(val.toFixed(dec===8?5:2)); }}
         protocolStats={protocolStats}/>
 
-      {/* Token pair selector */}
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
         <div style={{ flex:1 }}>
-          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>FROM</div>
-          <TS v={fr} onChange={v => { setFr(v); if (v === to) setTo(TK.find(t => t !== v) || "EURC"); setAmount(""); setQ(null); }} exclude={to}/>
+          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>DE</div>
+          <TS v={fr} onChange={v => { setFr(v); if (v===to) setTo(TK.find(t=>t!==v)||"EURC"); setAmount(""); setQ(null); }} exclude={to}/>
         </div>
         <button onClick={flip} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:"50%", width:34, height:34, cursor:"pointer", color:"#00FFB0", fontSize:16, display:"flex", alignItems:"center", justifyContent:"center", marginTop:16, flexShrink:0 }}>⇄</button>
         <div style={{ flex:1 }}>
-          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>TO</div>
-          <TS v={to} onChange={v => { setTo(v); if (v === fr) setFr(TK.find(t => t !== v) || "USDC"); setQ(null); }} exclude={fr}/>
+          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>VERS</div>
+          <TS v={to} onChange={v => { setTo(v); if (v===fr) setFr(TK.find(t=>t!==v)||"USDC"); setQ(null); }} exclude={fr}/>
         </div>
       </div>
 
-      <OsField label={`AMOUNT (${fr})`} value={amount} onChange={e => setAmount(e.target.value)}
+      <OsField label={`MONTANT (${fr})`} value={amount} onChange={e=>setAmount(e.target.value)}
         placeholder={tkFr.dec===8?"0.00000":"0.00"} icon="⇄" suffix={fr}/>
 
-      {/* Live quote */}
       {q && (
         <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.12)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontFamily:"monospace" }}>
           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
-            <span style={{ fontSize:8, color:"#64748b" }}>YOU RECEIVE</span>
+            <span style={{ fontSize:8, color:"#64748b" }}>VOUS RECEVEZ (estimé)</span>
             <span style={{ fontSize:11, color:"#00FFB0", fontWeight:700 }}>{q.out} {to}</span>
           </div>
           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
-            <span style={{ fontSize:7, color:"#475569" }}>Rate</span>
-            <span style={{ fontSize:7, color:"#94a3b8" }}>1 {fr} = {q.rate} {to}</span>
+            <span style={{ fontSize:7, color:"#475569" }}>Taux</span>
+            <span style={{ fontSize:7, color:"#94a3b8" }}>1 {fr} ≈ {q.rate} {to}</span>
           </div>
           <div style={{ display:"flex", justifyContent:"space-between" }}>
-            <span style={{ fontSize:7, color:"#475569" }}>Protocol fee</span>
-            <span style={{ fontSize:7, color:"#94a3b8" }}>{q.fee} {fr} (0.05%)</span>
+            <span style={{ fontSize:7, color:"#475569" }}>Slippage max</span>
+            <span style={{ fontSize:7, color:"#94a3b8" }}>0.5%</span>
           </div>
+        </div>
+      )}
+
+      {step && (
+        <div style={{ background:"rgba(14,165,233,.08)", border:"1px solid rgba(14,165,233,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:9, color:"#0EA5E9", fontFamily:"monospace" }}>
+          ⏳ {step}
         </div>
       )}
 
       <IG items={[
-        ["Privacy","✓ Hidden","ShieldVault ZK"],
-        ["Route","PrivateSwap","on-chain"],
-        ["Available", availFr.toFixed(tkFr.dec===8?5:2)+" "+fr, "shielded"],
+        ["Privacy",    "✓ ShieldVault","3-step flow"],
+        ["DEX",        "Arc Native",   "App Kit"],
+        ["Disponible", tkFr.bal.toFixed(tkFr.dec===8?5:2)+" "+fr, "shieldé"],
       ]}/>
 
-      {availFr <= 0 && (
+      {tkFr.bal <= 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
-          ⚠ No shielded {fr}. Shield {fr} first.
+          ⚠ Solde shieldé {fr} à zéro. Shieldez des {fr} d'abord.
         </div>
       )}
 
       <ArcBtn
-        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : `⇄ SWAP ${fr} → ${to}`}
-        onClick={onArc ? swap : undefined} loading={loading}
-        disabled={!onArc || !amount || Number(amount) <= 0 || !q || availFr <= 0}
+        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step || "En cours…" : `⇄ SWAP ${fr} → ${to}`}
+        onClick={onArc && !loading ? swap : undefined} loading={loading}
+        disabled={!onArc || !amount || Number(amount)<=0 || !q || tkFr.bal<=0 || loading}
         color={onArc ? "#00FFB0" : "#F59E0B"}
       />
     </div>
@@ -3434,66 +3488,56 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 }
 
 function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
+  // ── Architecture: Privacy Layer + App Kit ────────────────────────────────
+  // kit.bridge() supporte USDC uniquement via CCTP v2.
+  // Pour EURC/cirBTC : swap interne vers USDC d'abord, puis bridge.
+  //
+  // Flow USDC (2 txs) :
+  //   Tx 1 — ShieldVault.withdraw(USDC → wallet)
+  //   Tx 2 — kit.bridge(wallet → destination chain)
+  //
+  // Flow EURC/cirBTC (3 txs) :
+  //   Tx 1 — ShieldVault.withdraw(EURC/cirBTC → wallet)
+  //   Tx 2 — kit.swap(EURC/cirBTC → USDC) [App Kit]
+  //   Tx 3 — kit.bridge(USDC → destination)
   const CH = Object.values(CCTP_DOMAINS);
   const [destId, setDestId]       = useState(0);
   const [amount, setAmount]       = useState("");
   const [loading, setLoading]     = useState(false);
   const [recipient, setRecipient] = useState("");
-  const [token, setToken]         = useState("USDC"); // token selector: USDC | EURC | cirBTC
+  const [token, setToken]         = useState("USDC");
+  const [step, setStep]           = useState("");
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
   const ch = CH.find(c=>c.domainId===destId) || CH[0];
 
+  const KIT_KEY = import.meta.env.VITE_KIT_KEY ?? "";
+
   const BRIDGE_TOKENS = {
-    USDC:   { sym:"USDC",   addr:() => NATIVE_USDC,      dec:6, fmt:v=>"$"+v.toFixed(2),  color:"#00FFB0", bal: bals?.usdc  ?? 0 },
-    EURC:   { sym:"EURC",   addr:() => CONTRACTS.EURC,   dec:6, fmt:v=>"€"+v.toFixed(2),  color:"#60a5fa", bal: bals?.eurc  ?? 0 },
-    cirBTC: { sym:"cirBTC", addr:() => CONTRACTS.cirBTC, dec:8, fmt:v=>"₿"+v.toFixed(5), color:"#F7931A", bal: bals?.cbtc  ?? 0 },
+    USDC:   { sym:"USDC",   addr: NATIVE_USDC,      dec:6, bal: bals?.usdc ?? 0, color:"#00FFB0" },
+    EURC:   { sym:"EURC",   addr: CONTRACTS.EURC,   dec:6, bal: bals?.eurc ?? 0, color:"#60a5fa" },
+    cirBTC: { sym:"cirBTC", addr: CONTRACTS.cirBTC, dec:8, bal: bals?.cbtc ?? 0, color:"#F7931A" },
   };
   const tk = BRIDGE_TOKENS[token] || BRIDGE_TOKENS.USDC;
 
-  const bridge = async () => {
-    if (!amount || Number(amount) <= 0) return;
-    setLoading(true);
-
-    const tokenAddr = tk.addr();
-    if (!tokenAddr || tokenAddr === "0x0000000000000000000000000000000000000000") {
-      notify("Bridge", `${tk.sym} contract address not configured. Check deployment.`, "error");
-      setLoading(false); return;
-    }
-
-    const notes     = getNotes(account?.address);
-    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
-
-    // Same float-rounding-safe lookup as WithdrawPanel
-    const tokenNotes = notes.filter(n => n.token.toLowerCase() === tokenAddr.toLowerCase());
+  // ── Withdraw from ShieldVault ─────────────────────────────────────────────
+  const withdrawToWallet = async (tokenAddr, dec, amountBig, label) => {
+    const notes    = getNotes(account?.address);
+    const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenAddr.toLowerCase());
     let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
     if (!note && tokenNotes.length > 0) {
       note = tokenNotes.reduce((best, n) =>
         BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
       );
     }
-    if (!note) {
-      notify("Bridge", `No shielded ${tk.sym} note found. Shield ${tk.sym} first.`, "error");
-      setLoading(false); return;
-    }
-
-    notify("Bridge", "Cross-chain transfer initiated. Funds will arrive on the destination chain once the bridge confirms (1-5 min).", "info");
+    if (!note) return false;
 
     let root;
     try {
       const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
       root = (res && res !== "0x" && res.length >= 66) ? res : null;
     } catch { root = null; }
-    if (!root) {
-      notify("Bridge", "Could not read Merkle root from chain. Ensure you are on Arc Testnet.", "error");
-      setLoading(false); return;
-    }
-
-    const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
-      ? recipient.trim()
-      : account?.address || "0x0000000000000000000000000000000000000000";
-    const mintRecipient = "0x" + "000000000000000000000000" + recipientAddr.replace("0x", "").toLowerCase();
-    const nullifier = randomBytes32();
+    if (!root) return false;
 
     let flatFeeUsdc = 0n;
     try {
@@ -3501,118 +3545,179 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
     } catch {}
 
-    const { data, value } = buildPrivateBridgeCalldata({
-      nullifier, merkleRoot: root, destinationDomain: ch.domainId,
-      token: tokenAddr, amount: amountBig, mintRecipient, maxBridgeFee: 0n, flatFeeUsdc,
+    const { data, value: txValue } = buildWithdrawCalldata({
+      nullifier:  randomBytes32(), root,
+      token:      tokenAddr, recipient: account.address,
+      amount:     amountBig, relayerFee: 0n,
+      relayer:    "0x0000000000000000000000000000000000000000",
+      flatFeeUsdc,
     });
 
-    const feeDesc = flatFeeUsdc > 0n
-      ? ` (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC paid separately)`
-      : "";
-
     const ok = await sendRealTx({
-      label: `Bridge → ${ch.name}`,
-      description: `${amount} ${tk.sym} → ${ch.name} via CCTP v2${feeDesc} (private)`,
-      buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
+      label,
+      description: `Withdraw ${amount} ${token} from ShieldVault to wallet`,
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: txValue, data }),
     });
 
     if (ok) {
-      const updated  = notes.filter(n => n.commitment !== note.commitment);
+      const updated   = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
-      let backedUp = false;
-      if (remaining > 0n) {
-        const changeCommitment = randomBytes32();
-        updated.push({ ...note, amount: remaining.toString(), commitment: changeCommitment });
-        backedUp = await relaySelfNote({
-          account, sendRealTx, commitment: changeCommitment, amount: remaining, token: note.token,
-          label: "Bridge · Cross-Device Backup",
-          description: "Saving an encrypted copy of the change note on-chain.",
-        });
-      }
+      if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       saveNotes(account?.address, updated);
       recomputeShielded?.();
-      notify("Bridge ✓", `${amount} ${tk.sym} → ${ch.name} — funds will arrive in 1-5 min.${remaining>0n?(backedUp?" Change note backed up on-chain.":""):""}`, "success");
+    }
+    return ok;
+  };
+
+  const bridge = async () => {
+    if (!amount || Number(amount) <= 0 || !onArc) return;
+    if (!KIT_KEY) {
+      notify("Bridge", "VITE_KIT_KEY manquant — ajoutez votre clé Circle Console dans .env", "error");
+      return;
     }
 
-    setAmount(""); setRecipient(""); setLoading(false);
+    const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
+      ? recipient.trim() : account?.address;
+
+    setLoading(true);
+    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
+
+    // ── Étape 1 : Unshield ──────────────────────────────────────────────────
+    setStep(`Étape 1/${token==="USDC"?"2":"3"} — Unshield ${token}…`);
+    const wd1 = await withdrawToWallet(tk.addr, tk.dec, amountBig, `Unshield ${token}`);
+    if (!wd1) {
+      notify("Bridge", `Échec unshield ${token}.`, "error");
+      setLoading(false); setStep(""); return;
+    }
+
+    // ── Étape 2 : Si non-USDC, swap vers USDC d'abord ────────────────────────
+    let bridgeAmount = amount;
+    if (token !== "USDC") {
+      setStep(`Étape 2/3 — Swap ${token} → USDC…`);
+      try {
+        const { SwapKit } = await import("@circle-fin/swap-kit");
+        const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+        const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+        const kit     = new SwapKit();
+        const result  = await kit.swap({
+          from: { adapter, chain: "Arc_Testnet" },
+          tokenIn: token, tokenOut: "USDC", amountIn: amount,
+          config: { kitKey: KIT_KEY },
+        });
+        if (result?.state === "error") throw new Error(result.error?.message ?? "Swap failed");
+        bridgeAmount = result?.amountOut ?? amount;
+      } catch (e) {
+        notify("Bridge", `Swap ${token}→USDC échoué: ${e.message}. Vos fonds sont dans le wallet.`, "error");
+        setLoading(false); setStep(""); return;
+      }
+    }
+
+    // ── Étape finale : kit.bridge() ───────────────────────────────────────────
+    const bridgeStep = token === "USDC" ? "2" : "3";
+    setStep(`Étape ${bridgeStep}/${bridgeStep} — Bridge USDC → ${ch.name}…`);
+    try {
+      const { BridgeKit } = await import("@circle-fin/bridge-kit");
+      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+      const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+      const kit     = new BridgeKit();
+
+      let result = await kit.bridge({
+        from: { adapter, chain: "Arc_Testnet" },
+        to:   { adapter, chain: ch.kitChain, recipientAddress: recipientAddr },
+        amount: bridgeAmount,
+      });
+
+      if (result?.state === "error") {
+        result = await kit.retryBridge(result, { from: adapter, to: adapter });
+      }
+
+      if (result?.state === "error") throw new Error("Bridge échoué après retry");
+
+      notify("Bridge ✓",
+        `${amount} ${token} → ${ch.name}${token!=="USDC"?" (via USDC CCTP)":""} — arrivée dans 1-5 min.`,
+        "success"
+      );
+    } catch (e) {
+      notify("Bridge", `Échec bridge: ${e.message}`, "error");
+    }
+
+    setAmount(""); setRecipient(""); setLoading(false); setStep("");
   };
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⟺" title="BRIDGE" sub="Cross-chain transfer via CCTP v2 — Arc Testnet → other testnets"/>
+      <PH icon="⟺" title="BRIDGE" sub="Confidential bridge — ShieldVault + Circle CCTP v2"/>
       <NotOnArcWarning/>
+
+      {!KIT_KEY && (
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace" }}>
+          ⚠ VITE_KIT_KEY requis —{" "}
+          <a href="https://console.circle.com" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>console.circle.com</a>
+        </div>
+      )}
+
       <div style={{ background:"rgba(14,165,233,.04)", border:"1px solid rgba(14,165,233,.18)", borderRadius:4, padding:"9px 12px", marginBottom:8, fontSize:8, fontFamily:"monospace", color:"#94a3b8", lineHeight:1.6 }}>
-        <div style={{ color:"#0EA5E9", fontWeight:700, marginBottom:3 }}>⬡ Powered by Circle App Kit + CCTP v2</div>
-        Confidential cross-chain transfer via Circle's Cross-Chain Transfer Protocol.
-        Only amount + destination chain visible on-chain. Recipient has governed visibility.
-        <br/>
-        <a href="https://developers.circle.com/stablecoins/cctp-getting-started" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>CCTP docs ↗</a>
-        {" · "}
-        <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit ↗</a>
+        <div style={{ color:"#0EA5E9", fontWeight:700, marginBottom:3 }}>⬡ Circle App Kit + CCTP v2</div>
+        {token === "USDC"
+          ? "2 étapes : Unshield USDC → Bridge CCTP v2"
+          : `3 étapes : Unshield ${token} → Swap ${token}→USDC → Bridge CCTP v2`}
       </div>
 
-            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }} protocolStats={protocolStats}/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
+        onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec===8?5:2)); }}
+        protocolStats={protocolStats}/>
 
-      <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
-        🛡 Transfert cross-chain confidentiel. Destinataire à visibilité gouvernée.
-      </div>
-
+      {/* Destination chain */}
       <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION CHAIN</div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5, marginBottom:8 }}>
-          {CH.map(c=><button key={c.domainId} onClick={()=>setDestId(c.domainId)} style={{ background:destId===c.domainId?"rgba(0,255,176,.08)":"rgba(0,0,0,.35)", border:`1px solid ${destId===c.domainId?"rgba(0,255,176,.4)":"rgba(0,255,176,.1)"}`, borderRadius:5, padding:"8px 4px", cursor:"pointer", textAlign:"center", transition:"all .2s" }}>
-            <div style={{ fontSize:15, marginBottom:2 }}>{c.icon}</div>
-            <div style={{ fontSize:7, color:destId===c.domainId?"#00FFB0":"#94a3b8", fontFamily:"monospace", lineHeight:1.3 }}>{c.name}</div>
-          </button>)}
+        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:7 }}>DESTINATION</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5 }}>
+          {CH.map(c=>(
+            <button key={c.domainId} onClick={()=>setDestId(c.domainId)}
+              style={{ background:destId===c.domainId?"rgba(0,255,176,.08)":"rgba(0,0,0,.35)", border:`1px solid ${destId===c.domainId?"rgba(0,255,176,.4)":"rgba(0,255,176,.1)"}`, borderRadius:5, padding:"8px 4px", cursor:"pointer", textAlign:"center" }}>
+              <div style={{ fontSize:15, marginBottom:2 }}>{c.icon}</div>
+              <div style={{ fontSize:7, color:destId===c.domainId?"#00FFB0":"#94a3b8", fontFamily:"monospace" }}>{c.name}</div>
+            </button>
+          ))}
         </div>
       </div>
 
-      <OsField label={`AMOUNT (${tk.sym})`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder={tk.dec===8?"0.00000":"0.00"} icon="⟺" suffix={tk.sym}/>
+      <OsField label={`MONTANT (${token})`} value={amount} onChange={e=>setAmount(e.target.value)}
+        placeholder={tk.dec===8?"0.00000":"0.00"} icon="⟺" suffix={token}/>
 
       <div style={{ marginBottom:10 }}>
         <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:5 }}>
-          ↗ RECIPIENT ON {ch?.name?.toUpperCase() || "DESTINATION"} (0x... — leave blank to bridge to yourself)
+          DESTINATAIRE SUR {ch?.name?.toUpperCase()} (laisser vide = votre adresse)
         </div>
-        <div style={{ background:"rgba(0,0,0,.35)", border:`1px solid ${recipient && !recipient.startsWith("0x") ? "rgba(248,113,113,.4)" : "rgba(0,255,176,.15)"}`, borderRadius:3 }}>
-          <input value={recipient} onChange={e => setRecipient(e.target.value)}
-            placeholder={account?.address ? `${account.address.slice(0,6)}…${account.address.slice(-4)} (your address)` : "0x..."}
-            style={{ width:"100%", background:"transparent", border:"none", outline:"none", padding:"10px 12px", color:"#ffffff", fontSize:9, fontFamily:"monospace" }}
-          />
+        <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.15)", borderRadius:3 }}>
+          <input value={recipient} onChange={e=>setRecipient(e.target.value)}
+            placeholder={`${account?.address?.slice(0,6)||"0x"}…${account?.address?.slice(-4)||"..."} (vous-même)`}
+            style={{ width:"100%", background:"transparent", border:"none", outline:"none", padding:"10px 12px", color:"#ffffff", fontSize:9, fontFamily:"monospace" }}/>
         </div>
-        {recipient && (!recipient.startsWith("0x") || recipient.length !== 42) && (
-          <div style={{ fontSize:8, color:"#f87171", fontFamily:"monospace", marginTop:4 }}>
-            ⚠ Enter a valid 0x… EVM address (42 chars), or leave blank to bridge to yourself.
-          </div>
-        )}
-        {!recipient && (
-          <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:3 }}>
-            Recipient is private — not visible on-chain (governed visibility via ZK proof).
-          </div>
-        )}
       </div>
 
-      {(() => {
-        const recipientDisplay = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
-          ? recipient.trim().slice(0,6)+"…"+recipient.trim().slice(-4)+" (custom)"
-          : "Self (your address)";
-        return <IG items={[["Token",tk.sym,"selected"],["Destination",ch?.name,"selected"],["Recipient",recipientDisplay,"private/ZK"],["Time","~1-5 min","bridge confirm"]]}/>;
-      })()}
+      {step && (
+        <div style={{ background:"rgba(14,165,233,.08)", border:"1px solid rgba(14,165,233,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:9, color:"#0EA5E9", fontFamily:"monospace" }}>
+          ⏳ {step}
+        </div>
+      )}
 
-      {(bals?.noteCount ?? 0) === 0 && (
+      <IG items={[
+        ["Token",    token,     "sélectionné"],
+        ["Vers",     ch?.name,  "CCTP v2"],
+        ["Privacy",  "✓ ShieldVault","nullifier"],
+      ]}/>
+
+      {tk.bal <= 0 && (
         <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
-          ⚠ No shielded notes. Use Shield panel first.
+          ⚠ Solde shieldé {token} à zéro.
         </div>
       )}
-      {tk.bal <= 0 && (bals?.noteCount ?? 0) > 0 && (
-        <div style={{ background:"rgba(14,165,233,.05)", border:"1px solid rgba(14,165,233,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#0EA5E9", fontFamily:"monospace" }}>
-          ⚠ Shielded {tk.sym} balance is zero. Select another token or shield {tk.sym} first.
-        </div>
-      )}
+
       <ArcBtn
-        label={!onArc?"⚠ SWITCH TO ARC TESTNET":`⟶ BRIDGE ${tk.sym} → ${ch?.name?.toUpperCase()}`}
-        onClick={onArc?bridge:undefined} loading={loading}
-        disabled={!onArc||!amount||Number(amount)<=0||tk.bal<=0}
-        color={onArc?"#00FFB0":"#F59E0B"}
+        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step || "En cours…" : `⟶ BRIDGE ${token} → ${ch?.name?.toUpperCase()}`}
+        onClick={onArc && !loading ? bridge : undefined} loading={loading}
+        disabled={!onArc || !amount || Number(amount)<=0 || tk.bal<=0 || loading}
+        color={onArc ? "#00FFB0" : "#F59E0B"}
       />
     </div>
   );

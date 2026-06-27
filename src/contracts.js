@@ -51,6 +51,7 @@ export const CONTRACTS = {
   WithdrawalManager:   _c.WithdrawalManager,
   ShieldedTransfer:    _c.ShieldedTransfer,
   PrivateSwap:         _c.PrivateSwap,
+  MockDEXRouter:       import.meta.env.VITE_MOCK_DEX_ROUTER ?? "0x0000000000000000000000000000000000000000",
   PrivateBridge:       _c.PrivateBridge,
   EmergencyController: _c.EmergencyController,
   MockVerifierZK:      _c.MockVerifierZK,
@@ -130,6 +131,13 @@ export const NATIVE_TO_ERC20    = BigInt("1000000000000"); // 10^12
 // BridgeParams     = ((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,uint32,address,uint256,bytes32,uint256,uint256[])
 // privateBridgeExec(BridgeParams) →
 //   privateBridgeExec(((uint256[2],uint256[2][2],uint256[2]),bytes32,bytes32,uint32,address,uint256,bytes32,uint256,uint256[]))
+
+// ── Circle App Kit key (free from console.circle.com) ───────────────────────
+// Used by SwapPanel (kit.swap) and BridgePanel (kit.bridge).
+// Set VITE_KIT_KEY in .env — never commit the actual key.
+export const KIT_KEY = typeof import?.meta?.env !== "undefined"
+  ? (import.meta.env.VITE_KIT_KEY ?? "")
+  : "";
 
 export const SEL = {
   // ERC-20
@@ -834,10 +842,11 @@ export function decodeBytesReturn(hex) {
 // ─── CCTP DESTINATION DOMAINS ────────────────────────────────────────────────
 // Circle CCTP v2 domain IDs (matches PrivateBridge.sol constructor)
 export const CCTP_DOMAINS = {
-  ethereum: { domainId: 0,  name: "Ethereum Sepolia",  icon: "Ξ",  note: "CCTP v2" },
-  avalanche:{ domainId: 1,  name: "Avalanche Fuji",    icon: "🔺", note: "CCTP v2" },
-  optimism: { domainId: 2,  name: "Optimism Sepolia",  icon: "🔴", note: "CCTP v2" },
-  arbitrum: { domainId: 3,  name: "Arbitrum Sepolia",  icon: "🔵", note: "CCTP v2" },
-  base:     { domainId: 6,  name: "Base Sepolia",      icon: "🔷", note: "CCTP v2" },
-  polygon:  { domainId: 7,  name: "Polygon Amoy",      icon: "⬟", note: "CCTP v2" },
+  // kitChain: App Kit chain identifier for kit.bridge() / kit.swap()
+  ethereum: { domainId: 0,  name: "Ethereum Sepolia",  icon: "Ξ",  note: "CCTP v2", kitChain: "Ethereum_Sepolia"       },
+  avalanche:{ domainId: 1,  name: "Avalanche Fuji",    icon: "🔺", note: "CCTP v2", kitChain: "Avalanche_Fuji"         },
+  optimism: { domainId: 2,  name: "Optimism Sepolia",  icon: "🔴", note: "CCTP v2", kitChain: "Optimism_Sepolia"       },
+  arbitrum: { domainId: 3,  name: "Arbitrum Sepolia",  icon: "🔵", note: "CCTP v2", kitChain: "Arbitrum_Sepolia"       },
+  base:     { domainId: 6,  name: "Base Sepolia",      icon: "🔷", note: "CCTP v2", kitChain: "Base_Sepolia"           },
+  polygon:  { domainId: 7,  name: "Polygon Amoy",      icon: "⬟", note: "CCTP v2", kitChain: "Polygon_Amoy_Testnet"  },
 };
