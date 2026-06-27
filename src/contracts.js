@@ -135,9 +135,7 @@ export const NATIVE_TO_ERC20    = BigInt("1000000000000"); // 10^12
 // ── Circle App Kit key (free from console.circle.com) ───────────────────────
 // Used by SwapPanel (kit.swap) and BridgePanel (kit.bridge).
 // Set VITE_KIT_KEY in .env — never commit the actual key.
-export const KIT_KEY = typeof import?.meta?.env !== "undefined"
-  ? (import.meta.env.VITE_KIT_KEY ?? "")
-  : "";
+export const KIT_KEY = import.meta.env.VITE_KIT_KEY ?? "";
 
 export const SEL = {
   // ERC-20
