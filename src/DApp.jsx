@@ -2941,18 +2941,22 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   };
 
   // ── Pre-flight check: estimate swap without touching vault ───────────────
+  // Uses AppKit (not SwapKit standalone) — AppKit has estimateSwap.
+  // kitKey goes in config (not from) per SDK reference.
   const preflightSwap = async (kitKey) => {
-    const { SwapKit } = await import("@circle-fin/swap-kit");
+    const { AppKit } = await import("@circle-fin/app-kit");
     const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
     const provider = window.ethereum;
     if (!provider) throw new Error("No EIP-1193 provider found");
     const adapter = await createViemAdapterFromProvider({ provider });
-    const kit = new SwapKit();
-    // estimateSwap validates the kitKey and checks liquidity WITHOUT executing
+    const kit = new AppKit();
+    // estimateSwap validates kitKey + checks liquidity WITHOUT executing any tx
     const estimate = await kit.estimateSwap({
-      from: { adapter, chain: "Arc_Testnet" },
-      tokenIn: fr, tokenOut: to, amountIn: amount,
-      config: { kitKey },
+      from:     { adapter, chain: "Arc_Testnet" },
+      tokenIn:  fr,
+      tokenOut: to,
+      amountIn: amount,
+      config:   { kitKey },
     });
     return { kit, adapter, estimate };
   };
@@ -2994,9 +2998,11 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     let swapResult = null;
     try {
       swapResult = await kit.swap({
-        from: { adapter, chain: "Arc_Testnet" },
-        tokenIn: fr, tokenOut: to, amountIn: amount,
-        config: { kitKey: KIT_KEY },
+        from:     { adapter, chain: "Arc_Testnet" },
+        tokenIn:  fr,
+        tokenOut: to,
+        amountIn: amount,
+        config:   { kitKey: KIT_KEY, slippageBps: 50 }, // 0.5% slippage
       });
       if (swapResult?.state === "error") throw new Error(swapResult.error?.message ?? "Swap failed");
     } catch (e) {
@@ -3631,9 +3637,11 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
         const kit     = new SwapKit();
         const result  = await kit.swap({
-          from: { adapter, chain: "Arc_Testnet" },
-          tokenIn: token, tokenOut: "USDC", amountIn: amount,
-          config: { kitKey: KIT_KEY },
+          from:     { adapter, chain: "Arc_Testnet" },
+          tokenIn:  token,
+          tokenOut: "USDC",
+          amountIn: amount,
+          config:   { kitKey: KIT_KEY, slippageBps: 50 },
         });
         if (result?.state === "error") throw new Error(result.error?.message ?? "Swap failed");
         bridgeAmount = result?.amountOut ?? amount;
@@ -3647,22 +3655,30 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     const bridgeStep = token === "USDC" ? "2" : "3";
     setStep(`Étape ${bridgeStep}/${bridgeStep} — Bridge USDC → ${ch.name}…`);
     try {
-      const { BridgeKit } = await import("@circle-fin/bridge-kit");
+      // AppKit includes both bridge() and estimateBridge() — use it directly
+      const { AppKit } = await import("@circle-fin/app-kit");
       const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-      const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
-      const kit     = new BridgeKit();
+      const provider = window.ethereum;
+      if (!provider) throw new Error("No EIP-1193 provider found");
+      const adapter = await createViemAdapterFromProvider({ provider });
+      const kit     = new AppKit();
 
       let result = await kit.bridge({
-        from: { adapter, chain: "Arc_Testnet" },
-        to:   { adapter, chain: ch.kitChain, recipientAddress: recipientAddr },
-        amount: bridgeAmount,
+        from:   { adapter, chain: "Arc_Testnet" },
+        to:     { adapter, chain: ch.kitChain, recipientAddress: recipientAddr },
+        amount: String(bridgeAmount),
+        token:  "USDC",
       });
 
       if (result?.state === "error") {
-        result = await kit.retryBridge(result, { from: adapter, to: adapter });
+        const failedStep = result.steps?.find(s => s.error);
+        if (failedStep?.error) {
+          // retryBridge signature: (result, { from, to }) where from/to are Adapters
+          result = await kit.retryBridge(result, { from: adapter, to: adapter });
+        }
       }
 
-      if (result?.state === "error") throw new Error("Bridge échoué après retry");
+      if (result?.state === "error") throw new Error(result.steps?.find(s=>s.errorMessage)?.errorMessage ?? "Bridge échoué");
 
       notify("Bridge ✓",
         `${amount} ${token} → ${ch.name}${token!=="USDC"?" (via USDC CCTP)":""} — arrivée dans 1-5 min.`,
