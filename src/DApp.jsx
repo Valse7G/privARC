@@ -2789,195 +2789,247 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
 }
 
 function SwapPanel({ account, usdcBalance, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
-  const TK = ["USDC","EURC"];
-  const [fr, setFr] = useState("USDC"); const [to, setTo] = useState("EURC");
-  const [amount, setAmount] = useState(""); const [q, setQ] = useState(null); const [loading, setLoading] = useState(false);
-  const [route, setRoute] = useState("stablefx"); // "stablefx" | "uniswap"
+  // All 3 shieldable tokens on Arc Testnet
+  const TK = ["USDC","EURC","cirBTC"];
+  const [fr, setFr]         = useState("USDC");
+  const [to, setTo]         = useState("EURC");
+  const [amount, setAmount] = useState("");
+  const [q, setQ]           = useState(null);
+  const [loading, setLoading] = useState(false);
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
 
-  // ── Arc StableFX router (native to Arc — stablecoin pairs: USDC/EURC/USYC) ─
-  // Address TBD — Circle expected to publish post-mainnet. Using address(0) for testnet.
-  const ARC_STABLEFX = "0x0000000000000000000000000000000000000000"; // TODO: update post-mainnet
-  // ── Uniswap V3/V4 router (pending Arc deployment — no public address yet) ──
-  const UNISWAP_ROUTER = "0x0000000000000000000000000000000000000000"; // TODO: update when Arc publishes
+  // Token metadata for swap (mirrors WD_TOKENS structure)
+  const SWAP_TOKENS = {
+    USDC:   { sym:"USDC",   addr: NATIVE_USDC,        dec:6, bal: bals?.usdc ?? 0, fmt:v=>"$"+v.toFixed(2)  },
+    EURC:   { sym:"EURC",   addr: CONTRACTS.EURC,     dec:6, bal: bals?.eurc ?? 0, fmt:v=>"€"+v.toFixed(2)  },
+    cirBTC: { sym:"cirBTC", addr: CONTRACTS.cirBTC,   dec:8, bal: bals?.cbtc ?? 0, fmt:v=>"₿"+v.toFixed(5)  },
+  };
+  const tkFr = SWAP_TOKENS[fr] || SWAP_TOKENS.USDC;
+  const tkTo = SWAP_TOKENS[to] || SWAP_TOKENS.EURC;
 
-  const ROUTES = [
-    { id:"stablefx", label:"Arc StableFX", desc:"Native Arc stablecoin AMM · USDC/EURC/USYC", live:true,  fee:"0.05%", color:"#00FFB0" },
-    { id:"uniswap",  label:"Uniswap V3",   desc:"Pending Arc deployment",                      live:false, fee:"0.30%", color:"#FF007A" },
-  ];
-  const activeRoute = ROUTES.find(r => r.id === route) || ROUTES[0];
-
-  useEffect(()=>{
-    if(!amount||isNaN(amount)||Number(amount)<=0){setQ(null);return;}
-    const id=setTimeout(()=>{
-      // Arc StableFX: EUR/USD rate from live prices
+  // Live quote — EUR/USD rate from prices, BTC rate from prices
+  useEffect(() => {
+    if (!amount || isNaN(amount) || Number(amount) <= 0) { setQ(null); return; }
+    const id = setTimeout(() => {
       const eurUsd = prices?.EUR ?? prices?.EURC ?? 1.08;
-      const rates = {
-        USDC:{ EURC: 1/eurUsd  },
-        EURC:{ USDC: eurUsd    },
-      };
-      const rate  = rates[fr]?.[to] ?? 1;
-      const feePct = activeRoute.live ? (activeRoute.id === "stablefx" ? 0.0005 : 0.003) : 0.0005;
-      const impact = activeRoute.id === "stablefx" ? (Number(amount) > 100 ? 0.05 : 0.02) : 0.10;
-      setQ({ out:(Number(amount)*rate*(1-feePct)).toFixed(6), fee:(Number(amount)*feePct).toFixed(4), impact:impact.toFixed(2), routeLabel: activeRoute.label });
-    },400);
-    return()=>clearTimeout(id);
-  },[amount,fr,to,route,prices]);
+      const btcUsd = prices?.BTC ?? prices?.cirBTC ?? 100000;
+      // Build rate matrix: all pairs via USD as intermediate
+      const toUsd = { USDC:1, EURC:eurUsd, cirBTC:btcUsd };
+      const rate   = toUsd[fr] / toUsd[to];
+      const feePct = 0.0005; // 0.05% StableFX / PrivateSwap
+      const out    = Number(amount) * rate * (1 - feePct);
+      const fee    = Number(amount) * feePct;
+      const impact = Number(amount) > 100 ? 0.05 : 0.02;
+      setQ({
+        out:   out.toFixed(tkTo.dec === 8 ? 6 : 4),
+        fee:   fee.toFixed(tkFr.dec === 8 ? 6 : 4),
+        impact: impact.toFixed(2),
+        rate:   rate.toFixed(tkTo.dec === 8 ? 8 : 4),
+      });
+    }, 400);
+    return () => clearTimeout(id);
+  }, [amount, fr, to, prices]);
+
+  // Flip from↔to
+  const flip = () => { setFr(to); setTo(fr); setAmount(""); setQ(null); };
 
   const swap = async () => {
     if (!amount || !q || !onArc) return;
     setLoading(true);
 
-    const notes = getNotes(account?.address);
-    const tokenInAddr = fr === "USDC" ? NATIVE_USDC : null;
-    const tokenOutAddr = to === "EURC" ? CONTRACTS.EURC : (to === "USDC" ? NATIVE_USDC : null);
+    const tokenInAddr  = tkFr.addr;
+    const tokenOutAddr = tkTo.addr;
 
-    if (!tokenInAddr) {
-      notify("Private Swap", `${fr} → ${to} swap not yet available. USDC → EURC only on Arc Testnet.`, "error");
+    if (!tokenInAddr || tokenInAddr === "0x0000000000000000000000000000000000000000") {
+      notify("Private Swap", `${fr} address not configured.`, "error");
       setLoading(false); return;
     }
     if (!tokenOutAddr || tokenOutAddr === "0x0000000000000000000000000000000000000000") {
-      notify("Private Swap", `Token ${to} address not configured. Add EURC_ADDRESS to your deployment.`, "error");
+      notify("Private Swap", `${to} address not configured.`, "error");
+      setLoading(false); return;
+    }
+    if (fr === to) {
+      notify("Private Swap", "Select different tokens.", "error");
       setLoading(false); return;
     }
 
-    const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig && n.token.toLowerCase() === tokenInAddr.toLowerCase());
+    const notes     = getNotes(account?.address);
+    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
+
+    // Float-safe note lookup (same pattern as WithdrawPanel)
+    const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenInAddr.toLowerCase());
+    let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+    if (!note && tokenNotes.length > 0) {
+      note = tokenNotes.reduce((best, n) =>
+        BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
+      );
+    }
     if (!note) {
       notify("Private Swap", `No shielded ${fr} note found. Shield ${fr} first.`, "error");
       setLoading(false); return;
     }
 
-    // Read current Merkle root
+    // Read Merkle root
     let merkleRoot;
     try {
       const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
       merkleRoot = (res && res !== "0x" && res.length >= 66) ? res : null;
     } catch { merkleRoot = null; }
     if (!merkleRoot) {
-      notify("Private Swap", "Could not read Merkle root from chain. Try again.", "error");
+      notify("Private Swap", "Could not read Merkle root. Try again.", "error");
       setLoading(false); return;
     }
 
-    const nullifier      = randomBytes32();
-    const commitmentOut  = randomBytes32();
-    // Slippage: 0.5% on testnet quote
-    const minAmountOut   = amountBig * 995n / 1000n;
-    const deadline       = BigInt(Math.floor(Date.now() / 1000) + 600);
+    const nullifier     = randomBytes32();
+    const commitmentOut = randomBytes32();
+    const minAmountOut  = amountBig * 990n / 1000n; // 1% slippage
+    const deadline      = BigInt(Math.floor(Date.now() / 1000) + 600);
 
-    // ── Protocol fee preview (v2.8 — ALWAYS denominated/collected in USDC) ──────
-    // Swap landing in USDC: % fee (swapFeeBps), skimmed from the DEX output — estimate
-    // only, actual fee is computed on-chain from the real output. Swap landing in
-    // EURC/cirBTC: flat flatFeeUsdc paid as a SEPARATE USDC side-payment via msg.value;
-    // the full DEX output is credited, never skimmed (no on-chain price feed exists to
-    // convert a % of EURC/cirBTC into a USDC fee).
+    // ── Protocol fee ─────────────────────────────────────────────────────────
     const tokenOutIsNativeUsdc = tokenOutAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
     let swapFeeEst = 0n, flatFeeUsdc = 0n;
     try {
       const [bpsRes, flatRes] = await Promise.all([
-        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps },  "latest"]),
+        rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.swapFeeBps  }, "latest"]),
         rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]),
       ]);
-      const bps = bpsRes && bpsRes !== "0x" ? BigInt(bpsRes) : 0n;
-      flatFeeUsdc = flatRes && flatRes !== "0x" ? BigInt(flatRes) : 0n;
-      const outBig = BigInt(Math.round(parseFloat(q.out) * 1e6));
-      swapFeeEst = previewSwapFee(outBig, bps, tokenOutIsNativeUsdc, flatFeeUsdc).fee;
-    } catch { /* fee read failed — assume 0, matches default deploy state */ }
+      const bps    = bpsRes && bpsRes !== "0x" ? BigInt(bpsRes) : 0n;
+      flatFeeUsdc  = flatRes && flatRes !== "0x" ? BigInt(flatRes) : 0n;
+      const outBig = BigInt(Math.round(parseFloat(q.out) * (10 ** tkTo.dec)));
+      swapFeeEst   = previewSwapFee(outBig, bps, tokenOutIsNativeUsdc, flatFeeUsdc).fee;
+    } catch {}
 
-    const routerAddr = route === "uniswap" ? UNISWAP_ROUTER : ARC_STABLEFX;
+    // ── dexRouter: use PrivateSwap module address (whitelisted by deployer) ──
+    // Arc Testnet: no external DEX live yet. PrivateSwap.executeSwap() is the
+    // whitelisted router — it receives tokenIn from ShieldVault, does an internal
+    // accounting swap (1:rate), and returns tokenOut. routeData encodes the swap.
+    const dexRouter = CONTRACTS.PrivateSwap;
+    // routeData: abi.encode(tokenIn, tokenOut, amountIn, minAmountOut, recipient=ShieldVault)
+    // For MockVerifierZK testnet: any routeData is accepted; PrivateSwap executes
+    // a direct safeTransfer of tokenOut from its own balance (pre-funded by deployer).
+    const routeData = "0x" + [
+      tokenInAddr.slice(2).padStart(64, "0"),
+      tokenOutAddr.slice(2).padStart(64, "0"),
+      amountBig.toString(16).padStart(64, "0"),
+      minAmountOut.toString(16).padStart(64, "0"),
+    ].join("");
+
     const { data, value } = buildPrivateSwapCalldata({
-      nullifier,
-      merkleRoot,
-      commitmentOut,
+      nullifier, merkleRoot, commitmentOut,
       tokenIn:      tokenInAddr,
       tokenOut:     tokenOutAddr,
       amountIn:     amountBig,
       minAmountOut,
       deadline,
-      dexRouter:    routerAddr,
-      routeData:    "0x",
+      dexRouter,
+      routeData,
       flatFeeUsdc,
     });
 
+    const feeDesc = swapFeeEst > 0n
+      ? ` (protocol fee: ~${formatToken(swapFeeEst, 6)} USDC)`
+      : "";
+
     const ok = await sendRealTx({
       label: `Swap ${fr}→${to}`,
-      description: tokenOutIsNativeUsdc
-        ? (swapFeeEst > 0n
-            ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (est. protocol fee: ~${formatToken(swapFeeEst, 6)} ${to})`
-            : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`)
-        : (flatFeeUsdc > 0n
-            ? `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault (protocol fee: ${formatToken(flatFeeUsdc, 6)} USDC, paid separately)`
-            : `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault`),
+      description: `Private swap ${amount} ${fr} → ~${q.out} ${to} via ShieldVault${feeDesc}`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
     if (ok) {
-      const updated = notes.filter(n => n.commitment !== note.commitment);
+      // Spend input note, keep change
+      const updated   = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
-      // Output note in tokenOut
-      const outAmount = BigInt(Math.round(Number(q.out) * 1e6));
+
+      // Add output note in tokenOut
+      const outAmount = BigInt(Math.round(parseFloat(q.out) * (10 ** tkTo.dec)));
       updated.push({ commitment: commitmentOut, amount: outAmount.toString(), token: tokenOutAddr, ts: Date.now() });
       saveNotes(account?.address, updated);
-      recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly
+      recomputeShielded?.();
 
-      // ── Item 2B: self-addressed encrypted note (cross-device reconstruction) ──
+      // Cross-device backup of output note
       const backedUp = await relaySelfNote({
         account, sendRealTx, commitment: commitmentOut, amount: outAmount, token: tokenOutAddr,
         label: "Swap · Cross-Device Backup",
         description: "Saving an encrypted copy of the swap output note on-chain.",
       });
-
-      notify("Note saved", `Swap output note (${q.out} ${to}) stored locally${backedUp ? " and backed up on-chain" : ""}.`, "info");
+      notify("Swap ✓", `${amount} ${fr} → ~${q.out} ${to} swapped privately${backedUp ? " · note backed up" : ""}.`, "success");
     }
 
     setAmount(""); setQ(null); setLoading(false);
   };
 
-  const TS=({v,onChange})=><select value={v} onChange={e=>onChange(e.target.value)} style={{ background:"rgba(0,0,0,.5)", border:"1px solid rgba(0,255,176,.18)", borderRadius:3, color:"#ffffff", fontSize:11, fontFamily:"monospace", padding:"8px 9px", cursor:"pointer", outline:"none", flexShrink:0 }}>{TK.map(t=><option key={t}>{t}</option>)}</select>;
+  const TS = ({ v, onChange, exclude }) => (
+    <select value={v} onChange={e => onChange(e.target.value)}
+      style={{ background:"rgba(0,0,0,.5)", border:"1px solid rgba(0,255,176,.18)", borderRadius:3, color:"#ffffff", fontSize:11, fontFamily:"monospace", padding:"8px 9px", cursor:"pointer", outline:"none", flexShrink:0 }}>
+      {TK.filter(t => t !== exclude).map(t => <option key={t}>{t}</option>)}
+    </select>
+  );
+
+  const availFr = tkFr.bal;
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⇄" title="CONFIDENTIAL SWAP" sub="Shielded exchange on Arc Testnet — confidential by design"/>
+      <PH icon="⇄" title="SWAP" sub="Confidential swap via ShieldVault — Arc Testnet"/>
       <NotOnArcWarning/>
+      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
+        onMax={(sym, val, _raw, dec) => { setFr(sym); setAmount(val.toFixed(dec===8?5:2)); }}
+        protocolStats={protocolStats}/>
 
-      {/* Route selector */}
-      <div style={{ marginBottom:10 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>SWAP ROUTE</div>
-        <div style={{ display:"flex", gap:6 }}>
-          {ROUTES.map(r => (
-            <button key={r.id} onClick={() => r.live && setRoute(r.id)} style={{
-              flex:1, padding:"8px 10px", textAlign:"left",
-              background: route===r.id ? `rgba(${r.color==="#00FFB0"?"0,255,176":"255,0,122"},.08)` : "rgba(0,0,0,.35)",
-              border: `1px solid ${route===r.id ? r.color+"44" : "rgba(0,255,176,.08)"}`,
-              borderRadius:4, cursor: r.live ? "pointer" : "default", opacity: r.live ? 1 : 0.45,
-            }}>
-              <div style={{ fontSize:9, color: r.live ? r.color : "#64748b", fontFamily:"monospace", fontWeight:700, marginBottom:2 }}>
-                {r.label} {!r.live && <span style={{ fontSize:7, color:"#64748b" }}>— pending</span>}
-              </div>
-              <div style={{ fontSize:7, color:"#4a5568", fontFamily:"monospace" }}>{r.desc}</div>
-              <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:2 }}>Fee: {r.fee}</div>
-            </button>
-          ))}
+      {/* Token pair selector */}
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>FROM</div>
+          <TS v={fr} onChange={v => { setFr(v); if (v === to) setTo(TK.find(t => t !== v) || "EURC"); setAmount(""); setQ(null); }} exclude={to}/>
+        </div>
+        <button onClick={flip} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.3)", borderRadius:"50%", width:34, height:34, cursor:"pointer", color:"#00FFB0", fontSize:16, display:"flex", alignItems:"center", justifyContent:"center", marginTop:16, flexShrink:0 }}>⇄</button>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:8, color:"#64748b", fontFamily:"monospace", marginBottom:4 }}>TO</div>
+          <TS v={to} onChange={v => { setTo(v); if (v === fr) setFr(TK.find(t => t !== v) || "USDC"); setQ(null); }} exclude={fr}/>
         </div>
       </div>
 
-      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val) => { setFr(sym); setAmount(val.toFixed(sym === "cirBTC" ? 5 : 2)); }} protocolStats={protocolStats}/>
-      <div style={{ background:"rgba(0,0,0,.35)", border:"1px solid rgba(0,255,176,.12)", borderRadius:5, padding:"13px 15px", marginBottom:10 }}>
-        <div style={{ display:"flex", gap:8, alignItems:"flex-end", marginBottom:10 }}><div style={{ flex:1 }}><OsField label="FROM" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="⬆"/></div><TS v={fr} onChange={v=>{setFr(v);if(v===to)setTo(TK.find(t=>t!==v));}}/></div>
-        <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}><button onClick={()=>{setFr(to);setTo(fr);setAmount("");setQ(null);}} style={{ background:"rgba(0,255,176,.08)", border:"1px solid rgba(0,255,176,.25)", borderRadius:"50%", width:30, height:30, cursor:"pointer", color:"#00FFB0", fontSize:15, display:"flex", alignItems:"center", justifyContent:"center" }}>⇅</button></div>
-        <div style={{ display:"flex", gap:8, alignItems:"flex-end" }}><div style={{ flex:1 }}><OsField label="TO (ESTIMATED)" value={q?q.out:""} placeholder="0.00" icon="⬇" readOnly/></div><TS v={to} onChange={v=>{setTo(v);if(v===fr)setFr(TK.find(t=>t!==v));}}/></div>
-      </div>
-      {q&&<div style={{ background:"rgba(0,0,0,.3)", border:"1px solid rgba(0,255,176,.08)", borderRadius:4, padding:"9px 12px", marginBottom:10 }}>
-        {[["Fee",`${q.fee} USDC`],["Impact",`~${q.impact}%`],["Route",`${fr} → ${q.routeLabel} → ${to}`],["Network","Arc Testnet (real tx)"]].map(([k,v])=>(
-          <div key={k} style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
-            <span style={{ fontSize:9, color:"#64748b", fontFamily:"monospace" }}>{k}</span>
-            <span style={{ fontSize:9, color:"#4ade80", fontFamily:"monospace" }}>{v}</span>
+      <OsField label={`AMOUNT (${fr})`} value={amount} onChange={e => setAmount(e.target.value)}
+        placeholder={tkFr.dec===8?"0.00000":"0.00"} icon="⇄" suffix={fr}/>
+
+      {/* Live quote */}
+      {q && (
+        <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.12)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontFamily:"monospace" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+            <span style={{ fontSize:8, color:"#64748b" }}>YOU RECEIVE</span>
+            <span style={{ fontSize:11, color:"#00FFB0", fontWeight:700 }}>{q.out} {to}</span>
           </div>
-        ))}
-      </div>}
-      <ArcBtn label={onArc?`⟶ SWAP VIA ${activeRoute.label.toUpperCase()}`:"⚠ SWITCH TO ARC TESTNET"} onClick={onArc?swap:undefined} loading={loading} disabled={!onArc||!amount||!q} color={onArc?"#00FFB0":"#F59E0B"}/>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
+            <span style={{ fontSize:7, color:"#475569" }}>Rate</span>
+            <span style={{ fontSize:7, color:"#94a3b8" }}>1 {fr} = {q.rate} {to}</span>
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between" }}>
+            <span style={{ fontSize:7, color:"#475569" }}>Protocol fee</span>
+            <span style={{ fontSize:7, color:"#94a3b8" }}>{q.fee} {fr} (0.05%)</span>
+          </div>
+        </div>
+      )}
+
+      <IG items={[
+        ["Privacy","✓ Hidden","ShieldVault ZK"],
+        ["Route","PrivateSwap","on-chain"],
+        ["Available", availFr.toFixed(tkFr.dec===8?5:2)+" "+fr, "shielded"],
+      ]}/>
+
+      {availFr <= 0 && (
+        <div style={{ background:"rgba(245,158,11,.06)", border:"1px solid rgba(245,158,11,.2)", borderRadius:4, padding:"8px 12px", marginBottom:12, fontSize:9, color:"#F59E0B", fontFamily:"monospace" }}>
+          ⚠ No shielded {fr}. Shield {fr} first.
+        </div>
+      )}
+
+      <ArcBtn
+        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : `⇄ SWAP ${fr} → ${to}`}
+        onClick={onArc ? swap : undefined} loading={loading}
+        disabled={!onArc || !amount || Number(amount) <= 0 || !q || availFr <= 0}
+        color={onArc ? "#00FFB0" : "#F59E0B"}
+      />
     </div>
   );
 }
@@ -2997,18 +3049,38 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   // registry to resolve names against. Only raw 0x addresses are accepted.
   const isArcName = to.trim().toLowerCase().endsWith(".arc");
 
+  // Token selector for send
+  const SEND_TOKENS = {
+    USDC:   { sym:"USDC",   addr: NATIVE_USDC,      dec:6, bal: bals?.usdc ?? 0 },
+    EURC:   { sym:"EURC",   addr: CONTRACTS.EURC,   dec:6, bal: bals?.eurc ?? 0 },
+    cirBTC: { sym:"cirBTC", addr: CONTRACTS.cirBTC, dec:8, bal: bals?.cbtc ?? 0 },
+  };
+  const [sendToken, setSendToken] = useState("USDC");
+  const tkSend = SEND_TOKENS[sendToken] || SEND_TOKENS.USDC;
+
   const sendShielded = async () => {
     if (!amount || Number(amount) <= 0) return;
     const dest = to.trim();
     if (isArcName) { notify("Send", "ARC Name Service is not live yet — enter a 0x address directly.", "error"); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(dest)) { notify("Send", "Invalid address format", "error"); return; }
+    if (!tkSend.addr || tkSend.addr === "0x0000000000000000000000000000000000000000") {
+      notify("Send", `${sendToken} address not configured.`, "error"); return;
+    }
     setLoading(true);
 
     const notes     = getNotes(account?.address);
-    const amountBig = BigInt(Math.round(Number(amount) * 1e6));
-    const note      = notes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+    const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkSend.dec)));
+
+    // Float-safe note lookup filtered by token
+    const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tkSend.addr.toLowerCase());
+    let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+    if (!note && tokenNotes.length > 0) {
+      note = tokenNotes.reduce((best, n) =>
+        BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
+      );
+    }
     if (!note) {
-      notify("Send", "No shielded balance found. Shield USDC first.", "error");
+      notify("Send", `No shielded ${sendToken} found. Shield ${sendToken} first.`, "error");
       setLoading(false); return;
     }
 
@@ -3067,7 +3139,7 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     const confirmed = await askConfirm({
       label:  "Confidential Send",
       amount,
-      token:  "USDC",
+      token:  sendToken,
       to:     dest,
       note:   (encryptedNote
         ? "Recipient has confidential receiving enabled — an encrypted note will be relayed on-chain so their wallet auto-discovers these funds. 2 transactions: shielded transfer, then note relay."
@@ -3077,10 +3149,10 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     if (!confirmed) { setLoading(false); return; }
 
     // Tx 1: the actual shielded fund movement (ShieldVault selector 0x5635a2e7)
-    const { data, value } = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut, sendFlatFee: sendFee });
+    const { data, value } = buildShieldedSendCalldata({ nullifierIn, merkleRoot, commitmentOut, sendFlatFee: sendFee, token: tkSend.addr });
     const ok = await sendRealTx({
       label: "Confidential Send",
-      description: `${amount} USDC → ${dest.slice(0,8)}… (shielded)`,
+      description: `${amount} ${sendToken} → ${dest.slice(0,8)}… (shielded)`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
 
@@ -3101,12 +3173,12 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       // Keep sender's copy of output note (local history only — not a spendable
       // note for the sender anymore, ownership transferred to the recipient, so
       // this is NOT self-relayed via ViewKeyRegistry).
-      updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: note.token, ts: Date.now(), sentTo: dest });
+      updated.push({ commitment: commitmentOut, amount: amountBig.toString(), token: tkSend.addr, ts: Date.now(), sentTo: dest });
       saveNotes(account?.address, updated);
       recomputeShielded?.(); // FIX: localStorage "storage" event never fires for same-tab writes — must call explicitly; this is why the sender's displayed balance wasn't dropping after a confidential send
 
       if (isSelfSend) {
-        notify("Confidential Send ✓", `${amount} USDC sent to your own shielded balance.`, "success");
+        notify("Confidential Send ✓", `${amount} ${sendToken} sent to your own shielded balance.`, "success");
       } else if (encryptedNote) {
         // Tx: relay the encrypted note via ViewKeyRegistry — non-blocking on failure,
         // funds already moved successfully in tx 1 regardless of this outcome.
@@ -3157,7 +3229,23 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       </div>
       {mode==="shielded"
         ? <>
-            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, raw, dec) => setAmount(val.toFixed(dec === 8 ? 5 : 2))} protocolStats={protocolStats}/>
+            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
+              onMax={(sym, val, _raw, dec) => { setSendToken(sym); setAmount(val.toFixed(dec===8?5:2)); }}
+              protocolStats={protocolStats}/>
+            {/* Token selector pills */}
+            <div style={{ display:"flex", gap:5, marginBottom:10 }}>
+              {Object.values(SEND_TOKENS).map(t => {
+                const active = sendToken === t.sym;
+                const col = t.sym==="USDC"?"#00FFB0":t.sym==="EURC"?"#60a5fa":"#F7931A";
+                return (
+                  <button key={t.sym} onClick={() => { setSendToken(t.sym); setAmount(""); }}
+                    style={{ flex:1, background:active?"rgba(0,0,0,.4)":"rgba(0,0,0,.2)", border:`1px solid ${active?col+"80":"rgba(255,255,255,.07)"}`, borderRadius:5, padding:"7px 4px", cursor:"pointer", textAlign:"center" }}>
+                    <div style={{ fontSize:8, color:active?col:"#64748b", fontFamily:"monospace" }}>{t.sym}</div>
+                    <div style={{ fontSize:9, color:active?col:"#475569", fontFamily:"monospace", fontWeight:700 }}>{t.bal.toFixed(t.dec===8?5:2)}</div>
+                  </button>
+                );
+              })}
+            </div>
             <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
               🛡 Confidential send — shielded balance is transferred with governed visibility. Sender and recipient addresses are not linked on-chain.
             </div>
@@ -3167,10 +3255,15 @@ function SendPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
           </div>
       }
       <OsField label="RECIPIENT (0x address)" value={to} onChange={e=>setTo(e.target.value)} placeholder="0x..." icon="↗" hint={isArcName?"⚠ ARC Name Service not live yet — use a 0x address":null}/>
-      <OsField label="AMOUNT (USDC)" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" icon="💸" suffix="USDC"/>
-      <IG items={[["Privacy",mode==="shielded"?"✓ Hidden":"✗ Public",""],["Route",mode==="shielded"?"ShieldVault":"Direct",""],["Gas","USDC","Arc Testnet"]]}/>
+      <OsField label={`AMOUNT (${sendToken})`} value={amount} onChange={e=>setAmount(e.target.value)} placeholder={tkSend.dec===8?"0.00000":"0.00"} icon="💸" suffix={sendToken}/>
+      <IG items={[
+        ["Privacy", mode==="shielded"?"✓ Hidden":"✗ Public", ""],
+        ["Route",   mode==="shielded"?"ShieldVault":"Direct", ""],
+        ["Token",   sendToken, "selected"],
+        ["Gas",     "USDC",    "Arc Testnet"],
+      ]}/>
       <ArcBtn
-        label={!onArc?"⚠ SWITCH TO ARC TESTNET":mode==="shielded"?"⟶ SHIELDED SEND":"⟶ PUBLIC SEND"}
+        label={!onArc?"⚠ SWITCH TO ARC TESTNET":mode==="shielded"?`⟶ SEND ${sendToken} (SHIELDED)`:"⟶ PUBLIC SEND"}
         onClick={onArc?(mode==="shielded"?sendShielded:sendPublic):undefined}
         loading={loading} disabled={!onArc||!to||!amount||isArcName}
         color={!onArc?"#F59E0B":mode==="shielded"?"#00FFB0":"#F59E0B"}
