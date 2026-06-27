@@ -2947,9 +2947,6 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     if (!amount || !q || !onArc) return;
     if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
     if (tkFr.bal <= 0) { notify("Swap", `Solde shieldé ${fr} insuffisant.`, "error"); return; }
-    const keyError = validateKitKey(KIT_KEY);
-    if (keyError) { notify("Swap", keyError, "error"); return; }
-
     setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
 
@@ -3003,13 +3000,10 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       <PH icon="⇄" title="SWAP" sub="Confidential swap — ShieldVault + Arc App Kit"/>
       <NotOnArcWarning/>
 
-      {(!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:")) && (
+      {KIT_KEY && !KIT_KEY.startsWith("KIT_KEY:") && (
         <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.7 }}>
-          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY invalide ou manquante</strong><br/>
-          Format requis : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code><br/>
-          1. Générez une clé gratuite sur{" "}
-          <a href="https://developers.circle.com/w3s/keys#kit-keys" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>developers.circle.com/w3s/keys#kit-keys</a><br/>
-          2. Ajoutez <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>VITE_KIT_KEY=KIT_KEY:xxx:yyy</code> dans .env (ou Vercel Dashboard)
+          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY format invalide</strong><br/>
+          Format attendu : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code>
         </div>
       )}
 
