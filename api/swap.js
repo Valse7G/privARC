@@ -25,7 +25,6 @@ import { createViemAdapterFromPrivateKey } from "@circle-fin/adapter-viem-v2";
 
 const KIT_KEY = process.env.KIT_KEY;
 
-export const config = { runtime: "nodejs18.x", maxDuration: 30 };
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");

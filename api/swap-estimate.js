@@ -20,7 +20,6 @@ const ARC_TESTNET_CHAIN = {
   rpcUrls: { default: { http: ["https://rpc.testnet.arc.io"] } },
 };
 
-export const config = { runtime: "nodejs18.x" };
 
 export default async function handler(req, res) {
   // CORS headers
