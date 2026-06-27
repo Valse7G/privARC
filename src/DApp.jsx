@@ -3161,10 +3161,19 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
     const notes     = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
-    const note = notes.find(n =>
-      BigInt(Math.round(Number(n.amount)||0)) >= amountBig &&
-      n.token.toLowerCase() === tk.addr.toLowerCase()
-    );
+
+    // Find best note for this token:
+    // 1. Prefer exact/sufficient note (amount >= requested)
+    // 2. If none (float rounding at MAX), fallback to largest note — avoids "not found"
+    //    when the user taps MAX and the displayed balance rounds differently than BigInt.
+    const tokenNotes = notes.filter(n => n.token.toLowerCase() === tk.addr.toLowerCase());
+    let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+    if (!note && tokenNotes.length > 0) {
+      // Fallback: use the largest note and clamp amount to its value
+      note = tokenNotes.reduce((best, n) =>
+        BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
+      );
+    }
     if (!note) {
       notify("Withdraw", `No shielded ${tk.sym} note found. Shield ${tk.sym} first.`, "error");
       setLoading(false); return;
@@ -3182,27 +3191,35 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
 
     const nullifier = randomBytes32();
 
-    const { data } = buildWithdrawCalldata({
-      nullifier, root,
-      token:      tk.addr,
-      recipient:  target,
-      amount:     amountBig,
-      relayerFee: 0n,
-      relayer:    "0x0000000000000000000000000000000000000000",
-    });
-
-    // Protocol fee — for USDC use % bps; for EURC/cirBTC use flat fee (v2.8)
+    // ── Protocol fee (v2.8) ────────────────────────────────────────────────────
+    // Native USDC: % bps skimmed on-chain from withdrawAmt → msg.value = 0x0
+    // EURC/cirBTC: flat flatFeeUsdc paid as separate USDC via msg.value
+    //              buildWithdrawCalldata computes: value = flatFeeUsdc * NATIVE_TO_ERC20
+    let flatFeeUsdc = 0n;
     let withdrawFee = 0n;
     try {
       if (tk.isNative) {
         const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
         const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
         withdrawFee = previewWithdrawFee(amountBig, bps, true, 0n).fee;
+        // flatFeeUsdc stays 0n for native USDC — fee is skimmed on-chain, no msg.value needed
       } else {
         const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
-        withdrawFee = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+        flatFeeUsdc  = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+        withdrawFee  = flatFeeUsdc;
       }
     } catch {}
+
+    // Pass flatFeeUsdc so buildWithdrawCalldata can compute correct msg.value
+    const { data, value: txValue } = buildWithdrawCalldata({
+      nullifier, root,
+      token:       tk.addr,
+      recipient:   target,
+      amount:      amountBig,
+      relayerFee:  0n,
+      relayer:     "0x0000000000000000000000000000000000000000",
+      flatFeeUsdc,
+    });
 
     const feeDesc = withdrawFee > 0n
       ? ` (protocol fee: ${formatToken(withdrawFee, 6)} USDC)`
@@ -3211,7 +3228,7 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
     const ok = await sendRealTx({
       label: "Withdraw",
       description: `${amount} ${tk.sym} → ${sh(target)} from ShieldVault${feeDesc}`,
-      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: "0x0", data }),
+      buildTx: () => ({ to: CONTRACTS.ShieldVault, value: txValue, data }),
     });
 
     if (ok) {
@@ -3306,10 +3323,15 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
 
     const notes     = getNotes(account?.address);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tk.dec)));
-    const note = notes.find(n =>
-      BigInt(Math.round(Number(n.amount)||0)) >= amountBig &&
-      n.token.toLowerCase() === tokenAddr.toLowerCase()
-    );
+
+    // Same float-rounding-safe lookup as WithdrawPanel
+    const tokenNotes = notes.filter(n => n.token.toLowerCase() === tokenAddr.toLowerCase());
+    let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
+    if (!note && tokenNotes.length > 0) {
+      note = tokenNotes.reduce((best, n) =>
+        BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
+      );
+    }
     if (!note) {
       notify("Bridge", `No shielded ${tk.sym} note found. Shield ${tk.sym} first.`, "error");
       setLoading(false); return;
