@@ -2967,7 +2967,12 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ tokenIn: fr, tokenOut: to, amountIn: String(amount) }),
       });
-      swapResult = await resp.json();
+      // Guard against HTML error pages (Vercel 500s return HTML, not JSON)
+      const text = await resp.text();
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch { throw new Error(`Server error (HTTP ${resp.status}) — check KIT_KEY in Vercel env vars`); }
+      swapResult = parsed;
       if (!swapResult.ok) throw new Error(swapResult.error ?? "Swap API failed");
     } catch (e) {
       notify("Swap partiel ⚠", `Swap échoué: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via Shield.`, "error");
@@ -3585,7 +3590,10 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({ tokenIn: token, tokenOut: "USDC", amountIn: String(amount) }),
         });
-        const result = await resp.json();
+        const text   = await resp.text();
+        let result;
+        try { result = JSON.parse(text); }
+        catch { throw new Error(`Server error (HTTP ${resp.status}) — check KIT_KEY in Vercel env vars`); }
         if (!result.ok) throw new Error(result.error ?? "Swap API failed");
         usdcAmountStr = result.amountOut ?? amount;
       } catch (e) {

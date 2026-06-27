@@ -1,57 +1,65 @@
 /**
- * api/swap.js — Vercel Serverless Function (Node.js)
- * ─────────────────────────────────────────────────────────────────────────────
- * Proxies Circle App Kit swap() server-side.
+ * api/swap.js — Vercel Serverless Function
+ * Calls Circle App Kit swap() server-side (CORS-restricted from browser).
  *
- * The Circle Stablecoin Service API is NOT accessible from a browser
- * (CORS + server-only auth). This function runs in Node.js on Vercel
- * and calls the API on behalf of the user.
+ * POST /api/swap  { tokenIn, tokenOut, amountIn }
+ * GET  /api/swap  → health check
  *
- * IMPORTANT: kit.swap() requires signing — it uses a Circle-managed wallet
- * (createViemAdapterFromPrivateKey) to execute the DEX transaction.
- * The user's ShieldVault already withdrew funds to their wallet (Step 1).
- * This API then executes the swap on Arc DEX and returns the result.
- *
- * POST /api/swap
- * Body: { tokenIn, tokenOut, amountIn, fromAddress, walletAddress }
- * Returns: { ok, txHash, amountOut } or { ok: false, error }
- *
- * env vars required (Vercel Dashboard):
- *   KIT_KEY       — KIT_KEY:<keyId>:<keySecret>  (Circle App Kit)
+ * Env var required in Vercel Dashboard:
+ *   KIT_KEY = KIT_KEY:<keyId>:<keySecret>
  */
 
-import { AppKit } from "@circle-fin/app-kit";
-import { createViemAdapterFromPrivateKey } from "@circle-fin/adapter-viem-v2";
-
-const KIT_KEY = process.env.KIT_KEY;
-
-
 export default async function handler(req, res) {
+  // Always return JSON
+  res.setHeader("Content-Type", "application/json");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // Health check
+  if (req.method === "GET") {
+    const KIT_KEY = process.env.KIT_KEY ?? "";
+    return res.status(200).json({
+      ok:      true,
+      status:  "ready",
+      kitKey:  KIT_KEY ? `${KIT_KEY.slice(0, 12)}…` : "NOT SET",
+      node:    process.version,
+    });
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  const KIT_KEY = process.env.KIT_KEY ?? "";
+  if (!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:") || KIT_KEY.split(":").length !== 3) {
+    return res.status(500).json({
+      ok: false,
+      error: `KIT_KEY not configured or invalid format on server. Got: "${KIT_KEY.slice(0, 15) || "(empty)"}". Add KIT_KEY=KIT_KEY:<id>:<secret> in Vercel env vars.`,
+    });
+  }
 
   const { tokenIn, tokenOut, amountIn } = req.body ?? {};
-  if (!tokenIn || !tokenOut || !amountIn)
-    return res.status(400).json({ ok: false, error: "Missing required fields: tokenIn, tokenOut, amountIn" });
-  if (!KIT_KEY)
-    return res.status(500).json({ ok: false, error: "KIT_KEY not configured on server. Add KIT_KEY to Vercel env vars." });
+  if (!tokenIn || !tokenOut || !amountIn) {
+    return res.status(400).json({
+      ok: false,
+      error: "Missing required fields: tokenIn, tokenOut, amountIn",
+    });
+  }
 
-  // ── NOTE ON SIGNING ────────────────────────────────────────────────────────
-  // kit.swap() on Arc DEX uses Circle's built-in liquidity routing.
-  // The actual swap tx is signed by the App Kit using the Circle Wallets
-  // infrastructure — the user doesn't need to sign this directly.
-  // The result txHash can be verified on ARCScan.
   try {
-    const kit     = new AppKit();
+    const { AppKit } = await import("@circle-fin/app-kit");
+    const { createViemAdapterFromPrivateKey } = await import("@circle-fin/adapter-viem-v2");
 
-    // For Arc Testnet swap, we use a read-only adapter (no private key needed
-    // for quote — execution is handled by Circle's Stablecoin Service).
-    // The swap executes atomically on the DEX, funded by the user's wallet
-    // (which received funds from ShieldVault.withdraw in step 1).
+    // For server-side swap we need a signer — but kit.swap() on Arc DEX
+    // is actually executed by Circle's Stablecoin Service, not by a signer.
+    // We pass a dummy adapter just to satisfy the SDK type requirement.
+    const kit = new AppKit();
+
     const result = await kit.swap({
       tokenIn,
       tokenOut,
@@ -61,7 +69,7 @@ export default async function handler(req, res) {
     });
 
     if (!result?.txHash) {
-      throw new Error(result?.error?.message ?? "Swap returned no txHash");
+      throw new Error(result?.error?.message ?? "Swap returned no txHash — check Arc testnet liquidity");
     }
 
     return res.status(200).json({
@@ -70,7 +78,10 @@ export default async function handler(req, res) {
       amountOut: result.amountOut ?? null,
     });
   } catch (e) {
-    console.error("[api/swap]", e.message);
-    return res.status(200).json({ ok: false, error: e.message ?? "Swap failed" });
+    console.error("[api/swap] error:", e.message);
+    return res.status(200).json({
+      ok:    false,
+      error: e.message ?? "Swap failed",
+    });
   }
 }
