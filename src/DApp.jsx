@@ -2930,70 +2930,91 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
     return ok;
   };
 
+  // ── Validate kitKey format before any on-chain action ───────────────────
+  const validateKitKey = (key) => {
+    // Expected format: KIT_KEY:<keyId>:<keySecret>
+    if (!key) return "VITE_KIT_KEY manquant. Ajoutez-la dans .env (format: KIT_KEY:<keyId>:<keySecret>). Clé gratuite sur console.circle.com";
+    if (!key.startsWith("KIT_KEY:") || key.split(":").length !== 3) {
+      return `Format invalide. Attendu: KIT_KEY:<keyId>:<keySecret> — reçu: "${key.slice(0,20)}…". Générez la clé sur developers.circle.com/w3s/keys#kit-keys`;
+    }
+    return null; // valid
+  };
+
+  // ── Pre-flight check: estimate swap without touching vault ───────────────
+  const preflightSwap = async (kitKey) => {
+    const { SwapKit } = await import("@circle-fin/swap-kit");
+    const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+    const provider = window.ethereum;
+    if (!provider) throw new Error("No EIP-1193 provider found");
+    const adapter = await createViemAdapterFromProvider({ provider });
+    const kit = new SwapKit();
+    // estimateSwap validates the kitKey and checks liquidity WITHOUT executing
+    const estimate = await kit.estimateSwap({
+      from: { adapter, chain: "Arc_Testnet" },
+      tokenIn: fr, tokenOut: to, amountIn: amount,
+      config: { kitKey },
+    });
+    return { kit, adapter, estimate };
+  };
+
   // ── Main swap flow ────────────────────────────────────────────────────────
   const swap = async () => {
     if (!amount || !q || !onArc) return;
     if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
-    if (!KIT_KEY) {
-      notify("Swap", "VITE_KIT_KEY manquant — ajoutez votre clé Circle Console dans .env", "error");
-      return;
-    }
-    if (tkFr.bal <= 0) {
-      notify("Swap", `Solde shieldé ${fr} insuffisant. Shieldez des ${fr} d'abord.`, "error");
-      return;
-    }
-    setLoading(true);
+    if (tkFr.bal <= 0) { notify("Swap", `Solde shieldé ${fr} insuffisant.`, "error"); return; }
 
+    // ── Validate kitKey format FIRST — before any on-chain action ────────────
+    const keyError = validateKitKey(KIT_KEY);
+    if (keyError) { notify("Swap", keyError, "error"); return; }
+
+    setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
+
+    // ── Étape 0 : Pre-flight — validate kitKey + get estimate (no vault touch) ─
+    setStep("Vérification App Kit…");
+    let kit, adapter, estimate;
+    try {
+      ({ kit, adapter, estimate } = await preflightSwap(KIT_KEY));
+    } catch (e) {
+      // kitKey invalid or liquidity issue — abort BEFORE touching the vault
+      notify("Swap annulé", `Vérification App Kit échouée: ${e.message} — aucun fonds déplacé.`, "error");
+      setLoading(false); setStep(""); return;
+    }
 
     // ── Étape 1 : Withdraw tokenIn → wallet ──────────────────────────────────
     setStep("Étape 1/3 — Unshield…");
     const { ok: wd1 } = await withdrawToWallet(tkFr.addr, tkFr.dec, amountBig);
     if (!wd1) {
-      notify("Swap", `Échec du withdraw ${fr}. Vérifiez votre note shieldée.`, "error");
+      notify("Swap", `Échec du withdraw ${fr}.`, "error");
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 2 : kit.swap() via App Kit (Arc native DEX) ────────────────────
-    setStep("Étape 2/3 — Swap via Arc App Kit…");
+    // ── Étape 2 : kit.swap() — reuse pre-validated kit + adapter ─────────────
+    setStep("Étape 2/3 — Swap via Arc DEX…");
     let swapResult = null;
     try {
-      // Dynamically import App Kit to keep bundle light when not used
-      const { SwapKit } = await import("@circle-fin/swap-kit");
-      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
-
-      const provider = window.ethereum;
-      if (!provider) throw new Error("No EIP-1193 provider found");
-
-      const adapter = await createViemAdapterFromProvider({ provider });
-      const kit     = new SwapKit();
-
       swapResult = await kit.swap({
         from: { adapter, chain: "Arc_Testnet" },
-        tokenIn:  fr,
-        tokenOut: to,
-        amountIn: amount,
+        tokenIn: fr, tokenOut: to, amountIn: amount,
         config: { kitKey: KIT_KEY },
       });
-
-      if (swapResult?.state === "error") {
-        throw new Error(swapResult.error?.message ?? "Swap failed");
-      }
+      if (swapResult?.state === "error") throw new Error(swapResult.error?.message ?? "Swap failed");
     } catch (e) {
-      notify("Swap", `Échec du swap App Kit: ${e.message}. Les fonds ont été retirés du vault — re-shieldez manuellement.`, "error");
+      // Swap failed AFTER unshield — fonds sont dans le wallet, informer l'utilisateur
+      notify("Swap partiel ⚠", `Swap échoué après unshield: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via le panel Shield.`, "error");
       setLoading(false); setStep(""); return;
     }
 
     // ── Étape 3 : deposit tokenOut → ShieldVault ─────────────────────────────
     setStep("Étape 3/3 — Re-shield output…");
-    const outAmount  = parseFloat(swapResult?.amountOut ?? q.out);
+    const outAmount    = parseFloat(swapResult?.amountOut ?? estimate?.estimatedOutput?.amount ?? q.out);
     const outAmountBig = BigInt(Math.round(outAmount * (10 ** tkTo.dec)));
 
     const ok3 = await depositToVault(tkTo.addr, tkTo.dec, outAmountBig);
     if (ok3) {
-      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec === 8 ? 5 : 2)} ${to} — swap confidentiel terminé.`, "success");
+      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé.`, "success");
     } else {
-      notify("Swap partiel", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les manuellement.`, "error");
+      notify("Swap partiel ⚠", `Swap OK mais re-shield échoué. Vos ${to} sont dans le wallet — shieldez-les via Shield.`, "error");
     }
 
     setAmount(""); setQ(null); setLoading(false); setStep("");
@@ -3011,11 +3032,13 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       <PH icon="⇄" title="SWAP" sub="Confidential swap — ShieldVault + Arc App Kit"/>
       <NotOnArcWarning/>
 
-      {!KIT_KEY && (
-        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace" }}>
-          ⚠ VITE_KIT_KEY non configuré. Obtenez une clé gratuite sur{" "}
-          <a href="https://console.circle.com" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>console.circle.com</a>
-          {" "}et ajoutez-la dans .env
+      {(!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:")) && (
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.7 }}>
+          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY invalide ou manquante</strong><br/>
+          Format requis : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code><br/>
+          1. Générez une clé gratuite sur{" "}
+          <a href="https://developers.circle.com/w3s/keys#kit-keys" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>developers.circle.com/w3s/keys#kit-keys</a><br/>
+          2. Ajoutez <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>VITE_KIT_KEY=KIT_KEY:xxx:yyy</code> dans .env (ou Vercel Dashboard)
         </div>
       )}
 
@@ -3569,12 +3592,20 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
     return ok;
   };
 
+  // Same kitKey validator as SwapPanel
+  const validateKitKey = (key) => {
+    if (!key) return "VITE_KIT_KEY manquant (format: KIT_KEY:<keyId>:<keySecret>) — console.circle.com";
+    if (!key.startsWith("KIT_KEY:") || key.split(":").length !== 3)
+      return `Format invalide: attendu KIT_KEY:<keyId>:<keySecret>. Générez sur developers.circle.com/w3s/keys#kit-keys`;
+    return null;
+  };
+
   const bridge = async () => {
     if (!amount || Number(amount) <= 0 || !onArc) return;
-    if (!KIT_KEY) {
-      notify("Bridge", "VITE_KIT_KEY manquant — ajoutez votre clé Circle Console dans .env", "error");
-      return;
-    }
+
+    // Validate kitKey format BEFORE touching vault
+    const keyError = validateKitKey(KIT_KEY);
+    if (keyError) { notify("Bridge", keyError, "error"); return; }
 
     const recipientAddr = (recipient.trim().startsWith("0x") && recipient.trim().length === 42)
       ? recipient.trim() : account?.address;
@@ -3649,10 +3680,11 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       <PH icon="⟺" title="BRIDGE" sub="Confidential bridge — ShieldVault + Circle CCTP v2"/>
       <NotOnArcWarning/>
 
-      {!KIT_KEY && (
-        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace" }}>
-          ⚠ VITE_KIT_KEY requis —{" "}
-          <a href="https://console.circle.com" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>console.circle.com</a>
+      {(!KIT_KEY || !KIT_KEY.startsWith("KIT_KEY:")) && (
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.7 }}>
+          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY invalide ou manquante</strong><br/>
+          Format : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code> —{" "}
+          <a href="https://developers.circle.com/w3s/keys#kit-keys" target="_blank" rel="noreferrer" style={{ color:"#f87171" }}>Générer ↗</a>
         </div>
       )}
 
