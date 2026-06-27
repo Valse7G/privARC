@@ -3240,29 +3240,6 @@ function WithdrawPanel({ account, usdcBalance, onArc, notify, refreshBalance, pr
       <PH icon="↙" title="WITHDRAW" sub="Unshield — exit confidential balance to public address"/>
       <NotOnArcWarning/>
 
-      {/* Token selector */}
-      <div style={{ marginBottom:10 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>TOKEN</div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5 }}>
-          {Object.values(WD_TOKENS).map(t => {
-            const active = token === t.sym;
-            const rgb = t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26";
-            return (
-              <button key={t.sym} onClick={() => { setToken(t.sym); setAmount(""); }}
-                style={{ background:active?`rgba(${rgb},.10)`:"rgba(0,0,0,.3)", border:`1px solid ${active?t.color+"60":"rgba(255,255,255,.07)"}`, borderRadius:5, padding:"8px 5px", cursor:"pointer", textAlign:"center", transition:"all .2s" }}>
-                <div style={{ fontSize:8, color:active?t.color:"#64748b", fontFamily:"monospace", marginBottom:2 }}>{t.sym}</div>
-                <div style={{ fontSize:11, color:active?t.color:"#475569", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.bal)}</div>
-                {t.bal > 0
-                  ? <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>
-                  : <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:2 }}>vide</div>
-                }
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ShieldedWallet — all 3 tokens actionable */}
       <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
 
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:10, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
@@ -3412,29 +3389,7 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
         <a href="https://developers.circle.com/w3s/circle-app-kit" target="_blank" rel="noreferrer" style={{ color:"#0EA5E9" }}>Circle App Kit ↗</a>
       </div>
 
-      {/* Token selector */}
-      <div style={{ marginBottom:10 }}>
-        <div style={{ fontSize:8, color:"#64748b", letterSpacing:".14em", fontFamily:"monospace", marginBottom:6 }}>TOKEN</div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:5 }}>
-          {Object.values(BRIDGE_TOKENS).map(t => {
-            const active = token === t.sym;
-            const rgb = t.color === "#00FFB0" ? "0,255,176" : t.color === "#60a5fa" ? "96,165,250" : "247,147,26";
-            return (
-              <button key={t.sym} onClick={() => { setToken(t.sym); setAmount(""); }}
-                style={{ background:active?`rgba(${rgb},.10)`:"rgba(0,0,0,.3)", border:`1px solid ${active?t.color+"60":"rgba(255,255,255,.07)"}`, borderRadius:5, padding:"8px 5px", cursor:"pointer", textAlign:"center", transition:"all .2s" }}>
-                <div style={{ fontSize:8, color:active?t.color:"#64748b", fontFamily:"monospace", marginBottom:2 }}>{t.sym}</div>
-                <div style={{ fontSize:11, color:active?t.color:"#475569", fontFamily:"monospace", fontWeight:700 }}>{t.fmt(t.bal)}</div>
-                {t.bal > 0
-                  ? <div style={{ fontSize:7, color:"#4a7c5f", fontFamily:"monospace", marginTop:2 }}>tap → MAX</div>
-                  : <div style={{ fontSize:7, color:"#334155", fontFamily:"monospace", marginTop:2 }}>vide</div>
-                }
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
+            <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]} onMax={(sym, val, _raw, dec) => { setToken(sym); setAmount(val.toFixed(dec === 8 ? 5 : 2)); }}/>
 
       <div style={{ background:"rgba(0,255,176,.03)", border:"1px solid rgba(0,255,176,.15)", borderRadius:4, padding:"9px 12px", marginBottom:12, fontSize:9, color:"#94a3b8", fontFamily:"monospace", lineHeight:1.6 }}>
         🛡 Transfert cross-chain confidentiel. Destinataire à visibilité gouvernée.
