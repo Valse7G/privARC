@@ -11,7 +11,7 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "@circle-fin/app-kit": "^1.0.0",
+    "@circle-fin/swap-kit": "^1.0.0",
     "@circle-fin/adapter-viem-v2": "^1.0.0",
     "viem": "^2.0.0"
   },

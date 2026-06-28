@@ -2789,21 +2789,26 @@ function ShieldPanel({ account, usdcBalance, onArc, notify, refreshBalance, prot
 }
 
 function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBals, recomputeShielded, protocolStats }) {
-  // ── Architecture: Privacy Layer + App Kit ────────────────────────────────
-  // Flow (3 sequential transactions):
-  //   Tx 1 — ShieldVault.withdraw(tokenIn → wallet)      [privacy: spend nullifier]
-  //   Tx 2 — kit.swap(tokenIn → tokenOut)                [App Kit: real Arc DEX]
-  //   Tx 3 — ShieldVault.deposit(tokenOut → commitment)  [privacy: new commitment]
+  // ── Architecture: ShieldVault + Circle SwapKit (browser) ─────────────────
+  // Uses @circle-fin/swap-kit (standalone, no rpc-websockets dep) with the
+  // browser wallet adapter createViemAdapterFromProvider(window.ethereum).
+  // kit.swap() executes on Arc StableFX DEX and signs via the user's wallet.
   //
-  // kit.swap() uses Arc's native liquidity pools (USDC/EURC/cirBTC on Arc Testnet).
-  // Requires VITE_KIT_KEY from Circle Console (free).
-  const TK = ["USDC","EURC","cirBTC"];
+  // Flow (3 txs):
+  //   Tx 1 — ShieldVault.withdraw(tokenIn → wallet)   [nullifier spent]
+  //   Tx 2 — SwapKit.swap(tokenIn → tokenOut)         [Arc StableFX DEX]
+  //   Tx 3 — ShieldVault.deposit(tokenOut → note)     [new commitment]
+  //
+  // kit.swap() requires VITE_KIT_KEY = KIT_KEY:<keyId>:<keySecret>
+  // (free at developers.circle.com/w3s/keys#kit-keys)
+
+  const TK  = ["USDC","EURC","cirBTC"];
   const [fr, setFr]           = useState("USDC");
   const [to, setTo]           = useState("EURC");
   const [amount, setAmount]   = useState("");
   const [q, setQ]             = useState(null);
   const [loading, setLoading] = useState(false);
-  const [step, setStep]       = useState(""); // progress label
+  const [step, setStep]       = useState("");
   const { sendRealTx } = useTxSend({ account, onArc, notify, refreshBalance });
   const bals = shieldedBals;
 
@@ -2817,29 +2822,25 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
   const tkFr = SWAP_TOKENS[fr] || SWAP_TOKENS.USDC;
   const tkTo = SWAP_TOKENS[to] || SWAP_TOKENS.EURC;
 
-  // Live quote via App Kit estimateSwap (if KIT_KEY set) or price matrix fallback
+  // Live price-matrix quote
   useEffect(() => {
     if (!amount || isNaN(amount) || Number(amount) <= 0) { setQ(null); return; }
-    const id = setTimeout(async () => {
+    const id = setTimeout(() => {
       const eurUsd = prices?.EUR ?? prices?.EURC ?? 1.08;
       const btcUsd = prices?.BTC ?? prices?.cirBTC ?? 100000;
       const toUsd  = { USDC:1, EURC:eurUsd, cirBTC:btcUsd };
       const rate   = toUsd[fr] / toUsd[to];
       const feePct = 0.0005;
-      setQ({
-        out:    (Number(amount) * rate * (1 - feePct)).toFixed(tkTo.dec === 8 ? 6 : 4),
-        fee:    (Number(amount) * feePct).toFixed(4),
-        rate:   rate.toFixed(tkTo.dec === 8 ? 8 : 4),
-      });
+      setQ({ out:(Number(amount)*rate*(1-feePct)).toFixed(tkTo.dec===8?6:4), rate:rate.toFixed(tkTo.dec===8?8:4) });
     }, 400);
     return () => clearTimeout(id);
   }, [amount, fr, to, prices]);
 
-  const flip = () => { const tmp = fr; setFr(to); setTo(tmp); setAmount(""); setQ(null); };
+  const flip = () => { const t=fr; setFr(to); setTo(t); setAmount(""); setQ(null); };
 
-  // ── Helper: withdraw from ShieldVault to wallet ───────────────────────────
+  // ── Withdraw from ShieldVault ─────────────────────────────────────────────
   const withdrawToWallet = async (tokenAddr, dec, amountBig) => {
-    const notes = getNotes(account?.address);
+    const notes      = getNotes(account?.address);
     const tokenNotes = notes.filter(n => n.token?.toLowerCase() === tokenAddr.toLowerCase());
     let note = tokenNotes.find(n => BigInt(Math.round(Number(n.amount)||0)) >= amountBig);
     if (!note && tokenNotes.length > 0) {
@@ -2847,147 +2848,119 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
         BigInt(Math.round(Number(n.amount)||0)) > BigInt(Math.round(Number(best.amount)||0)) ? n : best
       );
     }
-    if (!note) return { ok: false, note: null };
-
+    if (!note) return false;
     let root;
     try {
       const res = await rpcCall("eth_call", [{ to: CONTRACTS.MerkleTreeManager, data: buildGetLastRootCall() }, "latest"]);
       root = (res && res !== "0x" && res.length >= 66) ? res : null;
     } catch { root = null; }
-    if (!root) return { ok: false, note: null };
-
-    const nullifier = randomBytes32();
+    if (!root) return false;
     let flatFeeUsdc = 0n;
     try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
-      flatFeeUsdc = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
+      const r = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.flatFeeUsdc }, "latest"]);
+      flatFeeUsdc = r && r !== "0x" ? BigInt(r) : 0n;
     } catch {}
-
     const { data, value: txValue } = buildWithdrawCalldata({
-      nullifier, root,
-      token:      tokenAddr,
-      recipient:  account.address,
-      amount:     amountBig,
-      relayerFee: 0n,
-      relayer:    "0x0000000000000000000000000000000000000000",
-      flatFeeUsdc,
+      nullifier: randomBytes32(), root, token: tokenAddr, recipient: account.address,
+      amount: amountBig, relayerFee: 0n, relayer: "0x0000000000000000000000000000000000000000", flatFeeUsdc,
     });
-
     const ok = await sendRealTx({
-      label: `Unshield ${fr}`,
-      description: `Step 1/3 — Withdraw ${amount} ${fr} from ShieldVault to wallet`,
+      label: `Unshield ${fr}`, description: `Step 1/3 — Withdraw ${amount} ${fr} from ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value: txValue, data }),
     });
-
     if (ok) {
-      const updated   = notes.filter(n => n.commitment !== note.commitment);
+      const updated = notes.filter(n => n.commitment !== note.commitment);
       const remaining = BigInt(Math.round(Number(note.amount)||0)) - amountBig;
       if (remaining > 0n) updated.push({ ...note, amount: remaining.toString(), commitment: randomBytes32() });
       saveNotes(account?.address, updated);
       recomputeShielded?.();
     }
-
-    return { ok, note };
+    return ok;
   };
 
-  // ── Helper: deposit result back into ShieldVault ──────────────────────────
+  // ── Deposit to ShieldVault ────────────────────────────────────────────────
   const depositToVault = async (tokenAddr, dec, amountBig) => {
-    const tokenIsNative = tokenAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
-    let protocolFee = 0n;
-    try {
-      const feeRes = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
-      const bps = feeRes && feeRes !== "0x" ? BigInt(feeRes) : 0n;
-      protocolFee = amountBig * bps / 10000n;
-    } catch {}
-
+    const isNative   = tokenAddr.toLowerCase() === NATIVE_USDC.toLowerCase();
     const commitment = randomBytes32();
-    // Build deposit calldata — reuse buildDepositCalldata from contracts.js
-    const { data, value } = buildDepositCalldata({
-      token:       tokenAddr,
-      amount:      amountBig,
-      commitment,
-      protocolFee,
-      isNative:    tokenIsNative,
-    });
-
+    let protocolFee  = 0n;
+    try {
+      const r = await rpcCall("eth_call", [{ to: CONTRACTS.ShieldVault, data: SEL.protocolFeeBps }, "latest"]);
+      protocolFee = amountBig * (r && r!=="0x" ? BigInt(r) : 0n) / 10000n;
+    } catch {}
+    const { data, value } = buildDepositCalldata({ token: tokenAddr, amount: amountBig, commitment, protocolFee, isNative });
     const ok = await sendRealTx({
-      label: `Shield ${to}`,
-      description: `Step 3/3 — Deposit ${q?.out || "?"} ${to} into ShieldVault`,
+      label: `Shield ${to}`, description: `Step 3/3 — Deposit ${q?.out||"?"} ${to} into ShieldVault`,
       buildTx: () => ({ to: CONTRACTS.ShieldVault, value, data }),
     });
-
     if (ok) {
       const notes = getNotes(account?.address);
       notes.push({ commitment, amount: amountBig.toString(), token: tokenAddr, ts: Date.now() });
       saveNotes(account?.address, notes);
       recomputeShielded?.();
-      await relaySelfNote({
-        account, sendRealTx, commitment, amount: amountBig, token: tokenAddr,
-        label: "Swap · Cross-Device Backup",
-        description: "Encrypted backup of swap output note.",
-      });
+      await relaySelfNote({ account, sendRealTx, commitment, amount: amountBig, token: tokenAddr,
+        label: "Swap · Backup", description: "Encrypted backup of swap output note." });
     }
     return ok;
   };
 
-  // ── Validate kitKey format before any on-chain action ───────────────────
-  const validateKitKey = (key) => {
-    // Expected format: KIT_KEY:<keyId>:<keySecret>
-    if (!key) return "VITE_KIT_KEY manquant. Ajoutez-la dans .env (format: KIT_KEY:<keyId>:<keySecret>). Clé gratuite sur console.circle.com";
-    if (!key.startsWith("KIT_KEY:") || key.split(":").length !== 3) {
-      return `Format invalide. Attendu: KIT_KEY:<keyId>:<keySecret> — reçu: "${key.slice(0,20)}…". Générez la clé sur developers.circle.com/w3s/keys#kit-keys`;
-    }
-    return null; // valid
-  };
-
   // ── Main swap flow ────────────────────────────────────────────────────────
-  // App Kit cannot be called from the browser (CORS + server-only auth).
-  // We proxy kit.swap() through /api/swap (Vercel serverless).
   const swap = async () => {
     if (!amount || !q || !onArc) return;
     if (fr === to) { notify("Swap", "Sélectionnez deux tokens différents.", "error"); return; }
     if (tkFr.bal <= 0) { notify("Swap", `Solde shieldé ${fr} insuffisant.`, "error"); return; }
+
     setLoading(true);
     const amountBig = BigInt(Math.round(Number(amount) * (10 ** tkFr.dec)));
 
-    // ── Étape 1 : Unshield tokenIn → wallet ──────────────────────────────────
+    // ── Étape 1 : Unshield ───────────────────────────────────────────────────
     setStep("Étape 1/3 — Unshield…");
-    const { ok: wd1 } = await withdrawToWallet(tkFr.addr, tkFr.dec, amountBig);
-    if (!wd1) {
+    const wd = await withdrawToWallet(tkFr.addr, tkFr.dec, amountBig);
+    if (!wd) {
       notify("Swap", `Échec du withdraw ${fr}.`, "error");
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 2 : /api/swap — Circle App Kit (server-side) ───────────────────
-    setStep("Étape 2/3 — Swap via Arc DEX…");
+    // ── Étape 2 : SwapKit.swap() from browser ────────────────────────────────
+    setStep("Étape 2/3 — Swap via Arc StableFX…");
     let swapResult = null;
     try {
-      const resp = await fetch("/api/swap", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ tokenIn: fr, tokenOut: to, amountIn: String(amount) }),
+      // Dynamic import keeps the bundle light when swap is not used
+      const { SwapKit } = await import("@circle-fin/swap-kit");
+      const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+
+      if (!window.ethereum) throw new Error("Wallet provider introuvable");
+
+      const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+      const kit     = new SwapKit();
+
+      swapResult = await kit.swap({
+        from:     { adapter, chain: "Arc_Testnet" },
+        tokenIn:  fr,
+        tokenOut: to,
+        amountIn: String(amount),
+        config:   {
+          kitKey:      KIT_KEY || undefined,
+          slippageBps: 100, // 1%
+        },
       });
-      // Guard against HTML error pages (Vercel 500s return HTML, not JSON)
-      const text = await resp.text();
-      let parsed;
-      try { parsed = JSON.parse(text); }
-      catch { throw new Error(`Server error (HTTP ${resp.status}) — check KIT_KEY in Vercel env vars`); }
-      swapResult = parsed;
-      if (!swapResult.ok) throw new Error(swapResult.error ?? "Swap API failed");
+
+      if (!swapResult?.txHash) {
+        throw new Error(swapResult?.error?.message ?? "Swap: pas de txHash — vérifiez la liquidité Arc testnet ou votre VITE_KIT_KEY");
+      }
     } catch (e) {
       notify("Swap partiel ⚠", `Swap échoué: ${e.message}. Vos ${fr} sont dans le wallet — re-shieldez via Shield.`, "error");
       setLoading(false); setStep(""); return;
     }
 
-    // ── Étape 3 : Re-shield tokenOut → ShieldVault ───────────────────────────
+    // ── Étape 3 : Re-shield ──────────────────────────────────────────────────
     setStep("Étape 3/3 — Re-shield output…");
     const outAmount    = parseFloat(swapResult.amountOut ?? q.out);
     const outAmountBig = BigInt(Math.round(outAmount * (10 ** tkTo.dec)));
     const ok3 = await depositToVault(tkTo.addr, tkTo.dec, outAmountBig);
     if (ok3) {
-      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé. Tx: ${swapResult.txHash?.slice(0,10)}…`, "success");
+      notify("Swap ✓", `${amount} ${fr} → ${outAmount.toFixed(tkTo.dec===8?5:2)} ${to} — swap confidentiel terminé.`, "success");
     } else {
-      notify("Swap partiel ⚠", `Swap OK (${swapResult.txHash?.slice(0,10)}…) mais re-shield échoué. Shieldez ${to} manuellement.`, "error");
+      notify("Swap partiel ⚠", `Swap OK mais re-shield échoué. Shieldez ${to} manuellement.`, "error");
     }
 
     setAmount(""); setQ(null); setLoading(false); setStep("");
@@ -3002,23 +2975,22 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
 
   return (
     <div style={{ animation:"fi .3s ease" }}>
-      <PH icon="⇄" title="SWAP" sub="Confidential swap — ShieldVault + Arc App Kit"/>
+      <PH icon="⇄" title="SWAP" sub="Confidential swap — ShieldVault + Arc SwapKit"/>
       <NotOnArcWarning/>
 
       {KIT_KEY && !KIT_KEY.startsWith("KIT_KEY:") && (
-        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace", lineHeight:1.7 }}>
-          ⚠ <strong style={{ color:"#f87171" }}>VITE_KIT_KEY format invalide</strong><br/>
-          Format attendu : <code style={{ background:"rgba(0,0,0,.3)", padding:"1px 4px", borderRadius:2 }}>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code>
+        <div style={{ background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#fca5a5", fontFamily:"monospace" }}>
+          ⚠ VITE_KIT_KEY format invalide — attendu : <code>KIT_KEY:&lt;keyId&gt;:&lt;keySecret&gt;</code>
         </div>
       )}
 
       <div style={{ background:"rgba(0,255,176,.04)", border:"1px solid rgba(0,255,176,.1)", borderRadius:4, padding:"8px 12px", marginBottom:10, fontSize:8, color:"#64748b", fontFamily:"monospace", lineHeight:1.7 }}>
-        <span style={{ color:"#00FFB0", fontWeight:700 }}>3 étapes automatiques :</span>{" "}
-        Unshield {fr} → Swap via Arc DEX → Re-shield {to}
+        <span style={{ color:"#00FFB0", fontWeight:700 }}>3 étapes : </span>
+        Unshield {fr} → Swap via Arc StableFX → Re-shield {to}
       </div>
 
       <ShieldedWallet bals={bals} actionableFilter={["USDC","EURC","cirBTC"]}
-        onMax={(sym, val, _raw, dec) => { setFr(sym); if (sym === to) setTo(TK.find(t=>t!==sym)||"EURC"); setAmount(val.toFixed(dec===8?5:2)); }}
+        onMax={(sym, val, _raw, dec) => { setFr(sym); if (sym===to) setTo(TK.find(t=>t!==sym)||"EURC"); setAmount(val.toFixed(dec===8?5:2)); }}
         protocolStats={protocolStats}/>
 
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
@@ -3042,13 +3014,9 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
             <span style={{ fontSize:8, color:"#64748b" }}>VOUS RECEVEZ (estimé)</span>
             <span style={{ fontSize:11, color:"#00FFB0", fontWeight:700 }}>{q.out} {to}</span>
           </div>
-          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
+          <div style={{ display:"flex", justifyContent:"space-between" }}>
             <span style={{ fontSize:7, color:"#475569" }}>Taux</span>
             <span style={{ fontSize:7, color:"#94a3b8" }}>1 {fr} ≈ {q.rate} {to}</span>
-          </div>
-          <div style={{ display:"flex", justifyContent:"space-between" }}>
-            <span style={{ fontSize:7, color:"#475569" }}>Slippage max</span>
-            <span style={{ fontSize:7, color:"#94a3b8" }}>0.5%</span>
           </div>
         </div>
       )}
@@ -3061,8 +3029,8 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
 
       <IG items={[
         ["Privacy",    "✓ ShieldVault","3-step flow"],
-        ["DEX",        "Arc Native",   "App Kit"],
-        ["Disponible", tkFr.bal.toFixed(tkFr.dec===8?5:2)+" "+fr, "shieldé"],
+        ["DEX",        "Arc StableFX", "SwapKit"],
+        ["Disponible", tkFr.bal.toFixed(tkFr.dec===8?5:2)+" "+fr,"shieldé"],
       ]}/>
 
       {tkFr.bal <= 0 && (
@@ -3072,10 +3040,10 @@ function SwapPanel({ account, onArc, notify, refreshBalance, prices, shieldedBal
       )}
 
       <ArcBtn
-        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step || "En cours…" : `⇄ SWAP ${fr} → ${to}`}
+        label={!onArc ? "⚠ SWITCH TO ARC TESTNET" : loading ? step||"En cours…" : `⇄ SWAP ${fr} → ${to}`}
         onClick={onArc && !loading ? swap : undefined} loading={loading}
-        disabled={!onArc || !amount || Number(amount)<=0 || !q || tkFr.bal<=0 || loading}
-        color={onArc ? "#00FFB0" : "#F59E0B"}
+        disabled={!onArc||!amount||Number(amount)<=0||!q||tkFr.bal<=0||loading}
+        color={onArc?"#00FFB0":"#F59E0B"}
       />
     </div>
   );
@@ -3585,16 +3553,19 @@ function BridgePanel({ account, onArc, notify, refreshBalance, prices, shieldedB
       }
       setStep(`Étape 2/3 — Swap ${token}→USDC…`);
       try {
-        const resp   = await fetch("/api/swap", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ tokenIn: token, tokenOut: "USDC", amountIn: String(amount) }),
+        const { SwapKit } = await import("@circle-fin/swap-kit");
+        const { createViemAdapterFromProvider } = await import("@circle-fin/adapter-viem-v2");
+        if (!window.ethereum) throw new Error("Wallet provider introuvable");
+        const adapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+        const kit     = new SwapKit();
+        const result  = await kit.swap({
+          from:     { adapter, chain: "Arc_Testnet" },
+          tokenIn:  token,
+          tokenOut: "USDC",
+          amountIn: String(amount),
+          config:   { kitKey: KIT_KEY || undefined, slippageBps: 100 },
         });
-        const text   = await resp.text();
-        let result;
-        try { result = JSON.parse(text); }
-        catch { throw new Error(`Server error (HTTP ${resp.status}) — check KIT_KEY in Vercel env vars`); }
-        if (!result.ok) throw new Error(result.error ?? "Swap API failed");
+        if (!result?.txHash) throw new Error("Swap échoué — pas de txHash");
         usdcAmountStr = result.amountOut ?? amount;
       } catch (e) {
         notify("Bridge", `Swap ${token}→USDC échoué: ${e.message}. Vos ${token} sont dans le wallet.`, "error");

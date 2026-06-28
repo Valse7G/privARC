@@ -1,7 +1,0 @@
-{
-  "dependencies": {
-    "@circle-fin/app-kit": "^1.0.0",
-    "@circle-fin/adapter-viem-v2": "^1.0.0",
-    "viem": "^2.0.0"
-  }
-}
